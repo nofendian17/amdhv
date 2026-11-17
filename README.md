@@ -47,13 +47,10 @@ Note: the kext Makefile does not track header changes. After editing a `.hpp`, r
 qemu-system-x86_64 -accel hvf -cpu host -smp 4 -m 8G -drive file=win10.qcow2,if=virtio
 ```
 
-### colima / Docker
+### colima / Kiri (Docker)
 
-Full setup guide: [docs/COLIMA.md](docs/COLIMA.md). In short:
-
-- Use the **qemu** backend: `colima start --vm-type qemu`. The `vz` backend does not work on AMD.
-- Start colima **after** boot, when `kern.hv_support` is already 1 — Lima picks `-accel hvf` at start.
-- MacPorts QEMU already has the hypervisor entitlement — check it again after a `port upgrade qemu`.
+- **colima** (QEMU `-accel hvf` backend): full setup guide [docs/COLIMA.md](docs/COLIMA.md). Use `colima start --vm-type qemu` (`vz` is unsupported on AMD). Start colima after boot when `kern.hv_support` is 1.
+- **Kiri** (`Virtualization.framework` backend): full setup guide [docs/KIRI.md](docs/KIRI.md). Uses `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64` natively on Intel.
 
 ## Boot-args
 
