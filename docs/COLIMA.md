@@ -17,9 +17,7 @@ which colima limactl                  # all in /opt/local/bin
 ```
 
 No QEMU signing is needed for the VZ backend: `limactl` already carries the
-`com.apple.security.virtualization` entitlement. `scripts/sign-qemu.sh` is a no-op with MacPorts
-QEMU (already entitled with `com.apple.security.hypervisor`) and only matters for a Homebrew or
-custom QEMU build that lacks the entitlement.
+`com.apple.security.virtualization` entitlement, and the VZ path does not involve QEMU.
 
 ## 2. Check AMDHV is up
 

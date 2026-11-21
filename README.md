@@ -79,10 +79,9 @@ never starts. This is specific to QEMU's HVF accelerator: Windows boots normally
 and Android boots under the Android emulator, both through HVF/AMDHV. QEMU also needs the sub-page
 `hv_vm_unmap` rounding in this kext or it aborts with `HV_BAD_ARGUMENT` when creating a TPM device.
 
-The scripts `scripts/sign-qemu.sh` and `scripts/qemu-test.sh` are kept for reference only and are
-not part of the main workflow. `sign-qemu.sh` is a no-op with MacPorts QEMU (`codesign` already shows
-`com.apple.security.hypervisor`) and is not used at all by the VZ path — it only matters for a
-Homebrew or custom QEMU build that lacks the entitlement.
+The script `scripts/qemu-test.sh` is kept for reference only and is not part of the main workflow.
+No signing step is needed: MacPorts QEMU already carries `com.apple.security.hypervisor`, and the
+VZ path does not use QEMU at all.
 
 ## Boot-args
 

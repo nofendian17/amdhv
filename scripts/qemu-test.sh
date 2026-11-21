@@ -7,7 +7,8 @@
 #   ./scripts/qemu-test.sh [path-to-qemu-system-x86_64]
 #
 # Before: sysctl kern.hv_support must print 1 (the kext sets it), and QEMU needs the
-# hypervisor entitlement: run scripts/sign-qemu.sh on the binary first (or run this with sudo).
+# hypervisor entitlement. MacPorts QEMU already has it; a custom build must be signed with
+# com.apple.security.hypervisor (or run this with sudo).
 #
 # Success looks like Linux kernel messages on the serial console and, at the end, "initramfs
 # emergency recovery shell launched" and a "~ #" prompt (no root disk, no network, so Alpine's
