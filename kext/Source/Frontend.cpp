@@ -721,9 +721,8 @@ const uint32_t kRunFields[AMDHV_RUN_NFIELDS] = {
 #undef AMDHV_X
 };
 
-kern_return_t tVcpuRun(void *target, uint64_t arg)
+static kern_return_t vcpuRun(void *target, uint64_t deadline)
 {
-    note(HV_THREAD_TRAP, 0, arg);
     HvVcpu *v = static_cast<HvVcpu *>(target);
     if (!v)
         return kHvNoDev;
@@ -890,12 +889,21 @@ kern_return_t tVcpuRun(void *target, uint64_t arg)
         }
     }
     const uint64_t inRax = regs.rax, inRcx = regs.rcx, inRdx = regs.rdx;       /* what the client set before this entry */
-    IOReturn rc = cpu->runEx(&v->in, &v->out);
+    IOReturn rc = cpu->runEx(&v->in, &v->out, deadline);
     if (rc != kIOReturnSuccess) {
         static volatile SInt32 failed;
         if (OSIncrementAtomic(&failed) < 30)
             AMDHV_INFO("hv front end: run vcpu%u failed: 0x%x (rip %#llx)", v->id, rc, (unsigned long long)regs.rip);
         return hvFromIo(rc);
+    }
+    /*
+     * hv_vcpu_get_exec_time reads the first word of the read-only page and never traps, so it has to be
+     * current. hv_vcpu_get_idle_time reads the second word; the core does not emulate HLT in the kernel
+     * (the client handles that exit), so it stays 0.
+     */
+    {
+        const uint64_t execNs = cpu->execTimeNs();
+        __builtin_memcpy(v->ro, &execNs, sizeof(execNs));
     }
 
     /* What a client that is new to the native path does: the first exits, then one in 5000. Lets a stalled guest be read from amd-info log. */
@@ -984,6 +992,26 @@ kern_return_t tVcpuRun(void *target, uint64_t arg)
         }
     }
     return kHvOk;
+}
+
+kern_return_t tVcpuRun(void *target, uint64_t arg)
+{
+    note(HV_THREAD_TRAP, 0, arg);
+    return vcpuRun(target, 0);
+}
+
+/*
+ * hv_vcpu_run_until: arg is a mach_absolute_time deadline, HV_DEADLINE_FOREVER when the client wants the
+ * plain run semantics. AMD has no VMX preemption timer, so the core clamps the deadline onto its 10 ms
+ * slice and checks it at the exits it already takes (and before entering again). A client that asks for a
+ * short wait still gets control back at the deadline instead of after the next unrelated exit.
+ */
+kern_return_t tVcpuRunUntil(void *target, uint64_t arg)
+{
+    note(HV_THREAD_TRAP, 1, arg);
+    /* 0 is a deadline that passed at boot: keep it distinct from "no deadline" (HV_DEADLINE_FOREVER). */
+    const uint64_t deadline = arg == ~0ull ? 0 : (arg ? arg : 1);
+    return vcpuRun(target, deadline);
 }
 
 /* hv_vcpu_interrupt: `arg` is a mask of vCPU ids. */
@@ -1119,8 +1147,8 @@ kern_return_t stub(void *target, uint64_t arg)
 /* Task traps: 0 vm_create, 1 vm_destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc, 12 vcpu_create, 13 vcpu_interrupt are real; the rest is logged and answered per mode. */
 const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, S(0, 2), S(0, 3), tVmMap, tVmUnmap, tVmProtect, tVmSyncTsc, S(0, 8), S(0, 9),
                                       S(0, 10), S(0, 11), tVcpuCreate, tVcpuInterrupt, S(0, 14), S(0, 15)};
-/* Thread traps: 0 run, 1 run_until (the deadline is not honoured yet), 2 invalidate_tlb, 3/4 managed MSRs on/off, 10 set_msr_access, 5 vcpu_destroy, 7 read slot, 11 sync special regs, 12 capability of a writable slot are real. */
-const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRun, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy, S(1, 6), tReadSlot, S(1, 8),
+/* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 10 set_msr_access, 5 vcpu_destroy, 7 read slot, 11 sync special regs, 12 capability of a writable slot are real. */
+const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy, S(1, 6), tReadSlot, S(1, 8),
                                         tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite, S(1, 13), S(1, 14), S(1, 15)};
 #undef S
 

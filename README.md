@@ -19,8 +19,8 @@ It is a simplified rewrite of the RyzenHV project: native mode only, no shim, no
 ## Build
 
 ```bash
-make test          # 8 unit tests, runs anywhere
-make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke
+make test          # 9 unit tests, runs anywhere
+make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
 Note: the kext Makefile does not track header changes. After editing a `.hpp`, run `rm -rf build/kext-obj` first.
@@ -49,8 +49,10 @@ qemu-system-x86_64 -accel hvf -cpu host -smp 4 -m 8G -drive file=win10.qcow2,if=
 
 ### colima / Kiri (Docker)
 
-- **colima** (QEMU `-accel hvf` backend): full setup guide [docs/COLIMA.md](docs/COLIMA.md). Use `colima start --vm-type qemu` (`vz` is unsupported on AMD). Start colima after boot when `kern.hv_support` is 1.
+- **colima** (QEMU `-accel hvf` backend): full setup guide [docs/COLIMA.md](docs/COLIMA.md). `colima start --vm-type qemu` is the conservative choice; `vz` also runs on AMDHV (it goes through Hypervisor.framework too). Start colima after boot when `kern.hv_support` is 1.
 - **Kiri** (`Virtualization.framework` backend): full setup guide [docs/KIRI.md](docs/KIRI.md). Uses `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64` natively on Intel.
+
+What each Hypervisor.framework call answers on a given build: [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and `./build/hvf-probe` prints it live.
 
 ## Boot-args
 
@@ -85,7 +87,7 @@ the two kexts fight over SVM and only one can register as the hypervisor provide
 
 ## Limits
 
-- 16 vCPUs per VM. One VM program at a time is safest.
+- 64 vCPUs per VM (VZ's maximum, and what the front end reserves). One VM program at a time is safest.
 - Sleep/wake with a running VM is untested — shut VMs down first.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.
@@ -98,8 +100,9 @@ the two kexts fight over SVM and only one can register as the hypervisor provide
 ```
 kext/          the kext: SVM, VMCB, VMRUN, nested page tables, the Hypervisor.framework front end
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
-tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test)
-tests/         the 8 unit tests
+tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
+               hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
+tests/         the 9 unit tests
 scripts/       EFI install, QEMU signing, QEMU boot test, symbol check
 ```
 

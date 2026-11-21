@@ -2,6 +2,7 @@
 
 #include "KernelDecls.hpp"
 #include "MsrMap.hpp"
+#include "RunDeadline.hpp"
 #include "X86.hpp"
 #include "Log.hpp"
 #include "SVM.hpp"
@@ -515,6 +516,7 @@ bool com_amdhv_AMDHVVm::init()
     fRunCpu        = -1;
     fFirstRun    = true;
     fHaveNextRip = false;
+    fExecAbs     = 0;
 
     fLock = IOLockAlloc();
     return fLock != nullptr;
@@ -751,7 +753,7 @@ void com_amdhv_AMDHVVm::kick()
         mp_cpus_call(1ull << cpu, 2 /* NOSYNC */, kickAction, nullptr);
 }
 
-IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
+IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t deadline)
 {
     IOReturn rc = kIOReturnSuccess;
     Vmcb *v = (Vmcb *)fVmcb.va;
@@ -780,7 +782,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
 
     uint64_t sliceAbs = 0;
     nanoseconds_to_absolutetime(kTimesliceNs, &sliceAbs);
-    uint64_t deadline = mach_absolute_time() + sliceAbs;
+    const uint64_t sliceDeadline = amdhv::run::stopTime(mach_absolute_time() + sliceAbs, deadline);
+    /*
+     * A client deadline (hv_vcpu_run_until) can only shorten the slice. When it is what ends the run, the
+     * exit reason is the VMX preemption-timer reason, which is what an Intel client sees when the timer
+     * fires; a slice that ends on its own is still reported as an external interrupt, as before.
+     */
+    const bool deadlineIsStop = deadline != 0 && sliceDeadline == deadline;
     uint64_t code = 0;
     bool timeslice = false;
     uint32_t syntheticReason = 0;       /* VMX exit reason to report instead of an external interrupt (TPR below threshold) */
@@ -830,6 +838,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
                 takePendingEvent();
                 break;
             }
+        }
+        /* A run_until deadline that has already passed: report it, do not enter the guest. */
+        if (deadline != 0 && amdhv::run::expired(mach_absolute_time(), deadline) && !injectionWaiting()) {
+            timeslice = true;
+            syntheticReason = amdhv::vmx::VMX_PREEMPTION_TIMER;
+            takePendingEvent();
+            break;
         }
         /*
          * The page tables must not change while this vCPU is inside the guest: hold them for reading from here until the
@@ -943,7 +958,9 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
             amdhv_wrmsr(amdhv::msr::MSR_TSC_AUX, fVmcs.tscAux());
         }
 
+        const uint64_t execStart = mach_absolute_time();
         amdhv_svm_vmrun(&fGprs, fVmcb.pa, fHostVmcb.pa);
+        fExecAbs += mach_absolute_time() - execStart;
         fRunCpu = -1;
 
         if (fHasTscAux) {
@@ -1000,8 +1017,10 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
                 v->control.eventInjErr = v->control.exitIntInfoErr;
             }
             /* The host needed the CPU. It has it now; run on unless the slice is over. */
-            if (mach_absolute_time() >= deadline && !injectionWaiting()) {
+            if (amdhv::run::expired(mach_absolute_time(), sliceDeadline) && !injectionWaiting()) {
                 timeslice = true;
+                if (deadlineIsStop)
+                    syntheticReason = amdhv::vmx::VMX_PREEMPTION_TIMER;
                 takePendingEvent();
                 break;
             }
@@ -1047,8 +1066,10 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
                     takePendingEvent();
                     break;
                 }
-                if (mach_absolute_time() >= deadline && !injectionWaiting()) {
+                if (amdhv::run::expired(mach_absolute_time(), sliceDeadline) && !injectionWaiting()) {
                     timeslice = true;
+                    if (deadlineIsStop)
+                        syntheticReason = amdhv::vmx::VMX_PREEMPTION_TIMER;
                     takePendingEvent();
                     break;
                 }
@@ -1101,6 +1122,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
 
     IOLockUnlock(fLock);
     return rc;
+}
+
+uint64_t com_amdhv_AMDHVVm::execTimeNs()
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(fExecAbs, &ns);
+    return ns;
 }
 
 IOReturn com_amdhv_AMDHVVm::msrOp(uint32_t op, uint32_t msrNum, uint64_t value, uint64_t *out)
@@ -1195,7 +1223,7 @@ IOReturn com_amdhv_AMDHVVm::vmcsReadMany(const AMDHVReadMany *in, AMDHVReadManyO
     return kIOReturnSuccess;
 }
 
-IOReturn com_amdhv_AMDHVVm::runEx(const AMDHVRunIn *in, AMDHVRunOut *out)
+IOReturn com_amdhv_AMDHVVm::runEx(const AMDHVRunIn *in, AMDHVRunOut *out, uint64_t deadline)
 {
     bzero(out, sizeof(*out));
     if (in->nWrites > AMDHV_RUN_MAX_WRITES)
@@ -1215,7 +1243,7 @@ IOReturn com_amdhv_AMDHVVm::runEx(const AMDHVRunIn *in, AMDHVRunOut *out)
         }
     }
     if (!(in->flags & AMDHV_RUN_NO_RUN)) {
-        rc = run((in->flags & AMDHV_RUN_SKIP) != 0, &out->exit);
+        rc = run((in->flags & AMDHV_RUN_SKIP) != 0, &out->exit, deadline);
         if (rc != kIOReturnSuccess)
             return rc;
     }

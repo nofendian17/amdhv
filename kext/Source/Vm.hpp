@@ -113,8 +113,8 @@ public:
 
     IOReturn getRegs(AMDHVRegs *out);
     IOReturn setRegs(const AMDHVRegs *in);
-    IOReturn run(bool skipInstruction, AMDHVExit *out);
-    IOReturn runEx(const AMDHVRunIn *in, AMDHVRunOut *out);            /* apply, run, report in one call */
+    IOReturn run(bool skipInstruction, AMDHVExit *out, uint64_t deadline = 0);
+    IOReturn runEx(const AMDHVRunIn *in, AMDHVRunOut *out, uint64_t deadline = 0);            /* apply, run, report in one call */
     IOReturn vmcsReadMany(const AMDHVReadMany *in, AMDHVReadManyOut *out);
 
     /* The Hypervisor.framework (VMX-shaped) view of the guest. */
@@ -132,6 +132,12 @@ public:
 
     IOReturn getFpu(AMDHVFpuState *out);
     IOReturn setFpu(const AMDHVFpuState *in);
+
+    /*
+     * hv_vcpu_get_exec_time reads two words straight out of the read-only shared page (offset 0 and
+     * 8) and never traps. The front end copies this into offset 0 after every run.
+     */
+    uint64_t execTimeNs();
 
 private:
     bool     setup();
@@ -156,6 +162,7 @@ private:
     amdhv::GuestGprs            fGprs;
     bool                      fFirstRun;
     bool                      fHaveNextRip;
+    uint64_t                  fExecAbs;          /* total time inside VMRUN, mach absolute units */
 };
 
 #endif /* AMDHV_VM_HPP */

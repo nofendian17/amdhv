@@ -40,11 +40,13 @@ If `kern.hv_support` is 0, the kext is not loaded or the boot-args are missing â
 colima start --vm-type qemu --cpu 4 --memory 8
 ```
 
-The `vz` backend does **not** work on AMD â€” it goes through Apple's Virtualization.framework,
-not through Hypervisor.framework. If a profile already exists, check it:
+The `vz` backend goes through Apple's Virtualization.framework, which on x86 runs on
+Hypervisor.framework (`hv_vmx_*`) and therefore on AMDHV. It has been run here with Kiri and
+Docker Desktop, so `colima start --vm-type vz` is expected to work; `qemu` stays the conservative
+choice when a device model misbehaves. If a profile already exists, check it:
 
 ```bash
-grep vmType ~/.colima/*/colima.yaml    # must say vmType: qemu
+grep vmType ~/.colima/*/colima.yaml    # qemu and vz are both fine
 ```
 
 ## 4. Verify it runs through AMDHV
