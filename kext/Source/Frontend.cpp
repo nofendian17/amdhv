@@ -11,6 +11,7 @@
 
 #include "Frontend.hpp"
 #include "SVM.hpp"
+#include "HvSupportDecode.hpp"
 #include "HvMsrs.hpp"
 #include "HvSlots.hpp"
 #include "AMDHV.hpp"
@@ -1248,13 +1249,10 @@ bool setMode(uint32_t m)
  */
 bool addressFromCode(volatile int **out)
 {
-    const uint8_t *f = reinterpret_cast<const uint8_t *>(&hv_get_support);
-    static const uint8_t expect[6] = {0x55, 0x48, 0x89, 0xe5, 0x8b, 0x05};
-    if (__builtin_memcmp(f, expect, sizeof(expect)) != 0 || f[10] != 0x5d || f[11] != 0xc3)
+    const void *p = amdhv::hv::decodeSupportPtr(reinterpret_cast<const uint8_t *>(&hv_get_support));
+    if (!p)
         return false;
-    int32_t disp;
-    __builtin_memcpy(&disp, f + 6, sizeof(disp));
-    *out = reinterpret_cast<volatile int *>(const_cast<uint8_t *>(f) + 10 + disp);        /* rip after the mov is f + 10 */
+    *out = reinterpret_cast<volatile int *>(const_cast<void *>(p));
     return true;
 }
 
@@ -1307,6 +1305,17 @@ bool setSysctl(bool on)
     int viaOid = -1;
     if (!oidValue(&viaOid) || viaOid != cur) {          /* before writing: the OID must show the same value as the located int */
         AMDHV_WARN("hv front end: kern.hv_support reads %d through its OID but the located int is %d; refusing, nothing written", viaOid, cur);
+        return false;
+    }
+    /*
+     * One more witness before writing: the int we decoded must be the one hv_get_support() reads.
+     * The OID check above only proves that the OID and the decoded int agree; a wrong decode that
+     * happens to hold the same value (0 on AMD) would pass it. If the accessor and the decoded int
+     * disagree, the decode is wrong and nothing is written.
+     */
+    const int viaAccessor = hv_get_support();
+    if (viaAccessor != cur) {
+        AMDHV_WARN("hv front end: hv_get_support() reads %d but the decoded int is %d; refusing, nothing written", viaAccessor, cur);
         return false;
     }
     gSupportPtr = p;
