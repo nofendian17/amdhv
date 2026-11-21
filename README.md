@@ -16,9 +16,10 @@ It is a simplified rewrite of the RyzenHV project: native mode only, no shim, no
 - Xcode command line tools (`xcode-select --install`).
 - OpenCore.
 
-A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop, Kiri,
-colima with the `vz` backend), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no
-longer a target — see [QEMU is not the supported path](#qemu-is-not-the-supported-path).
+A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop or Kiri),
+VirtualBox, or the Android emulator. colima is documented in [docs/COLIMA.md](docs/COLIMA.md) but
+is not installed on the reference machine. QEMU with `-accel hvf` is no longer a target — see
+[QEMU is not the supported path](#qemu-is-not-the-supported-path).
 
 ## Build
 
@@ -49,13 +50,13 @@ Note: the kext Makefile does not track header changes. After editing a `.hpp`, r
 | --- | --- |
 | Docker Desktop (VZ) | engine works; containers serve traffic |
 | Kiri (VZ) | runs Linux/amd64 natively on Intel, exposes the Docker API |
-| colima (`--vm-type vz`) | VZ backend works through Hypervisor.framework |
+| colima (`--vm-type vz`) | not installed on this host — VZ backend expected through HVF, not verified here |
 | VirtualBox 7.2.22 | Windows 10 (64-bit, 4 vCPU, 8 GiB) boots to desktop |
 | Android Studio emulator 37.3.10 | Android 17 AVD boots; ADB, input and network work |
 | QEMU 11.1.3 (`-accel hvf`) | Linux boots; Windows 10/11 stop at the Tianocore logo |
 
-These are single-host observations, not a support promise: VirtualBox, Docker Desktop, Android
-Studio and QEMU are **not officially supported clients** of this project. What each
+These are single-host observations, not a support promise: colima, VirtualBox, Docker Desktop,
+Android Studio and QEMU are **not officially supported clients** of this project. What each
 Hypervisor.framework call answers on a given build is in [docs/CAPABILITIES.md](docs/CAPABILITIES.md),
 and `./build/hvf-probe` prints it live.
 
@@ -65,9 +66,10 @@ and `./build/hvf-probe` prints it live.
   `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes
   the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64`
   natively on Intel.
-- **colima**: use `colima start --vm-type vz` — the VZ backend runs through Hypervisor.framework.
-  The old `qemu` VM type is not the recommended path here; see [docs/COLIMA.md](docs/COLIMA.md) for
-  the full setup. Start the VM after boot, when `kern.hv_support` is 1.
+- **colima**: not installed on this host, so its status here is unverified. If used, prefer
+  `colima start --vm-type vz` — the VZ backend runs through Hypervisor.framework. The old `qemu`
+  VM type is not the recommended path; see [docs/COLIMA.md](docs/COLIMA.md) for the full setup.
+  Start the VM after boot, when `kern.hv_support` is 1.
 
 ### QEMU is not the supported path
 
