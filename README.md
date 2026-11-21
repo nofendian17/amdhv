@@ -16,9 +16,8 @@ It is a simplified rewrite of the RyzenHV project: native mode only, no shim, no
 - Xcode command line tools (`xcode-select --install`).
 - OpenCore.
 
-A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop or Kiri),
-VirtualBox, or the Android emulator. colima is documented in [docs/COLIMA.md](docs/COLIMA.md) but
-is not installed on the reference machine. QEMU with `-accel hvf` is no longer a target — see
+A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop, Kiri or
+colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longer a target — see
 [QEMU is not the supported path](#qemu-is-not-the-supported-path).
 
 ## Build
@@ -50,7 +49,7 @@ Note: the kext Makefile does not track header changes. After editing a `.hpp`, r
 | --- | --- |
 | Docker Desktop (VZ) | engine works; containers serve traffic |
 | Kiri (VZ) | runs Linux/amd64 natively on Intel, exposes the Docker API |
-| colima (`--vm-type vz`) | not installed on this host — VZ backend expected through HVF, not verified here |
+| colima 0.10.3 (`--vm-type vz`) | 4 vCPU/8 GiB VZ VM starts; `docker run hello-world` succeeds |
 | VirtualBox 7.2.22 | Windows 10 (64-bit, 4 vCPU, 8 GiB) boots to desktop |
 | Android Studio emulator 37.3.10 | Android 17 AVD boots; ADB, input and network work |
 | QEMU 11.1.3 (`-accel hvf`) | Linux boots; Windows 10/11 stop at the Tianocore logo |
@@ -66,10 +65,11 @@ and `./build/hvf-probe` prints it live.
   `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes
   the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64`
   natively on Intel.
-- **colima**: not installed on this host, so its status here is unverified. If used, prefer
-  `colima start --vm-type vz` — the VZ backend runs through Hypervisor.framework. The old `qemu`
-  VM type is not the recommended path; see [docs/COLIMA.md](docs/COLIMA.md) for the full setup.
-  Start the VM after boot, when `kern.hv_support` is 1.
+- **colima** (`--vm-type vz`): full setup guide [docs/COLIMA.md](docs/COLIMA.md). Verified here with
+  colima 0.10.3 / lima 2.3.0: `colima start --vm-type vz --cpu 4 --memory 8` boots through
+  Virtualization.framework and `docker run hello-world` succeeds. limactl carries the
+  `com.apple.security.virtualization` entitlement, so no QEMU signing is involved. The old `qemu`
+  VM type is not the recommended path. Start the VM after boot, when `kern.hv_support` is 1.
 
 ### QEMU is not the supported path
 
@@ -80,7 +80,9 @@ and Android boots under the Android emulator, both through HVF/AMDHV. QEMU also 
 `hv_vm_unmap` rounding in this kext or it aborts with `HV_BAD_ARGUMENT` when creating a TPM device.
 
 The scripts `scripts/sign-qemu.sh` and `scripts/qemu-test.sh` are kept for reference only and are
-not part of the main workflow.
+not part of the main workflow. `sign-qemu.sh` is a no-op with MacPorts QEMU (`codesign` already shows
+`com.apple.security.hypervisor`) and is not used at all by the VZ path — it only matters for a
+Homebrew or custom QEMU build that lacks the entitlement.
 
 ## Boot-args
 
