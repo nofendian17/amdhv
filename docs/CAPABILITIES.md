@@ -20,15 +20,19 @@ running VZ VM (`com.apple.Virtualization.VirtualMachine`, Kiri with six containe
 | trap | call | frequency |
 | --- | --- | --- |
 | task 12 | `hv_vcpu_create` | once per vCPU |
+| thread 1 | `hv_vcpu_run_until` (`HV_DEADLINE_FOREVER`) | after every exit |
 | thread 7 | `hv_vmx_vcpu_read_vmcs` (exit fields) | after every exit |
-| thread 0 | `hv_vcpu_run` | after every exit |
+| task 13 | `hv_vcpu_interrupt` | when the device model injects an IRQ |
 
 No in-kernel APIC, IOAPIC, PIO notifier or address-space call appears. That is why the missing
 stubs below do not stop VZ today: VZ emulates the APIC, the timer and every device itself and only
 needs memory mapping, vCPU state, VM exits and interrupt injection.
 
-`hv_vcpu_run` is called with `HV_DEADLINE_FOREVER`, so VZ does not depend on the preemption timer.
-A future client can, which is why `hv_vcpu_run_until` now honours a finite deadline.
+VZ uses `hv_vcpu_run_until`, not `hv_vcpu_run`: the live trap log shows `thread 1 vcpu_run_until` with
+arg `0xffffffffffffffff` (`HV_DEADLINE_FOREVER`) after every exit. (`hv_vcpu_run` has no deadline
+argument, so it cannot be "called with FOREVER".) VZ therefore does not depend on the preemption
+timer, but the `run_until` path is on its hot path today. A finite deadline is clamped onto the
+core's 10 ms slice and reported as VMX exit reason 52; VZ never asks for one.
 
 ## Baseline probe output (AMDHV 0.1.0, before this increment)
 
@@ -120,7 +124,8 @@ Two answers in that table are the visible symptoms of the gaps fixed in this inc
   VZ maximum. The probe should print `64 of 64` after a reboot.
 - `hv_vcpu_run_until` carries a deadline into `runEx`/`run`. The core clamps it onto its 10 ms
   slice (`RunDeadline.hpp`, covered by `tests/run_deadline_test.cpp`) and reports a deadline-driven
-  return as VMX exit reason 52. A past deadline returns without entering the guest.
+  return as VMX exit reason 52. A past deadline returns without entering the guest. VZ exercises
+  the `HV_DEADLINE_FOREVER` branch of this path on every run (see the trap table above).
 - `hv_vcpu_get_exec_time` is real: the core accumulates the time spent inside VMRUN and the front
   end copies it to ro page offset 0 after every run. The probe should show a non-zero value after
   the HLT run.
