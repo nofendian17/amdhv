@@ -36,6 +36,8 @@ test: | $(BUILD)
 	$(BUILD)/slots_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/run_deadline_test tests/run_deadline_test.cpp
 	$(BUILD)/run_deadline_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/tsc_adjust_test tests/tsc_adjust_test.cpp
+	$(BUILD)/tsc_adjust_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/hv_support_decode_test tests/hv_support_decode_test.cpp
 	$(BUILD)/hv_support_decode_test
 
