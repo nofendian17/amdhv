@@ -142,28 +142,29 @@ AMDHV 0.1.0 loaded:
 | guest | client | result |
 | --- | --- | --- |
 | Windows 10 (64-bit), 4 vCPU, 8 GiB | VirtualBox 7.2.22 | boots to desktop; Task Manager reports 4 vCPUs and uptime advances |
+| Android 17 AVD (`Medium_Phone_API_37.0`) | Android Studio emulator 37.3.10 | boots to launcher; ADB online, input, UI and network work |
 | LinuxKit / Docker Desktop | VZ | works; engine starts and containers serve traffic |
 | Lubuntu 24.04, 4 vCPU, QEMU `tsc=reliable` | QEMU 11.1.3 `-accel hvf` | boots to login prompt |
 | Windows 10 and 11 | QEMU 11.1.3 `-accel hvf` | OVMF, `BOOTX64.EFI` and `cdboot.efi` load and the Tianocore logo appears, but setup never starts |
 
-The VirtualBox result is not a guess from the window being open: `com.amdhv.AMDHV`'s `vmExits`
-counter stops increasing when the VM is paused and resumes increasing when it is resumed, and no
-other VBox kernel extension is loaded. So Windows does run through HVF/AMDHV — the QEMU hang is
-specific to QEMU's HVF accelerator, not a missing capability in this kext. The QEMU attempts
-produced no host panic and no `vmInvalidExits` or `assertFailures` in AMDHV.
+The VirtualBox and Android results are not guesses from a window being open: `com.amdhv.AMDHV`'s
+`vmExits` counter stops increasing while the VirtualBox VM is paused or the emulator process is
+suspended, and resumes when each is allowed to run. No other VBox kernel extension is loaded, and
+`vmInvalidExits` and `assertFailures` stayed at zero. So Windows and Android do run through
+HVF/AMDHV — the QEMU hang is specific to QEMU's HVF accelerator, not a missing capability in this
+kext. The QEMU attempts produced no host panic either.
 
 ### Support status
 
 VirtualBox, Docker Desktop and Android Studio are **not officially supported clients** of this
 project. The results above are informational observations from a single host with the listed client
-versions; they are not a compatibility guarantee and no support is implied. Android Studio was
-**not tested** — there is no recorded result for its AVD guests.
+versions; they are not a compatibility guarantee and no support is implied.
 
 | client | official support | status on this host |
 | --- | --- | --- |
 | VirtualBox 7.2.22 | no | observed: Windows 10 boots to desktop |
+| Android Studio emulator 37.3.10 | no | observed: Android 17 AVD boots, ADB and input responsive |
 | Docker Desktop | no | observed: engine starts, containers serve traffic |
-| Android Studio | no | not tested |
 
 QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding fixed
 (commit `356d903`); without it QEMU aborts with `HV_BAD_ARGUMENT` before the guest starts.
