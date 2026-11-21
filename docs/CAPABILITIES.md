@@ -138,7 +138,7 @@ everything else should still match.
 ## Guest compatibility seen on this host
 
 Hypervisor.framework clients other than VZ were also exercised on an AMD Ryzen 5 3600 host with
-AMDHV 0.1.0 loaded:
+the 0.1.x kext loaded:
 
 | guest | client | result |
 | --- | --- | --- |

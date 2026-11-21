@@ -5,8 +5,8 @@ AMDHV registers in place of AppleHV, so any x86 client that uses Hypervisor.fram
 This page links the per-client guides.
 
 **None of these clients is officially supported by this project.** The results below are
-observations from one host (AMD Ryzen 5 3600 / Zen 2, macOS Sequoia, AMDHV 0.1.0) with the listed
-client versions. Treat them as examples, not a compatibility guarantee.
+observations from one host (AMD Ryzen 5 3600 / Zen 2, macOS Sequoia) with the listed client versions
+and the 0.1.x kext. Treat them as examples, not a compatibility guarantee.
 
 | client | backend | observed result | guide |
 | --- | --- | --- | --- |
