@@ -1,6 +1,7 @@
 # AMDHV
 
-Run QEMU with `-accel hvf` on a **Hackintosh with an AMD CPU**.
+Run **Hypervisor.framework** guests on a **Hackintosh with an AMD CPU** — Docker/VZ, VirtualBox and
+the Android emulator.
 
 AMDHV is a kernel extension. At boot it registers with macOS **in place of Apple's AppleHV**, so the
 unmodified Hypervisor.framework talks to it. The hardware work is done by AMD-V (SVM).
@@ -14,12 +15,15 @@ It is a simplified rewrite of the RyzenHV project: native mode only, no shim, no
 - "SVM Mode" **enabled in the BIOS**.
 - Xcode command line tools (`xcode-select --install`).
 - OpenCore.
-- QEMU (MacPorts: `sudo port install qemu`).
+
+A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop, Kiri,
+colima with the `vz` backend), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no
+longer a target — see [QEMU is not the supported path](#qemu-is-not-the-supported-path).
 
 ## Build
 
 ```bash
-make test          # 9 unit tests, runs anywhere
+make test          # 10 unit tests, runs anywhere
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
@@ -41,18 +45,40 @@ Note: the kext Makefile does not track header changes. After editing a `.hpp`, r
 
 ## Run a VM
 
-```bash
-./scripts/sign-qemu.sh           # gives QEMU the hypervisor entitlement (again after every upgrade)
-./scripts/qemu-test.sh           # boots a test Linux — everything is working
-qemu-system-x86_64 -accel hvf -cpu host -smp 4 -m 8G -drive file=win10.qcow2,if=virtio
-```
+| client | observed on this host |
+| --- | --- |
+| Docker Desktop (VZ) | engine works; containers serve traffic |
+| Kiri (VZ) | runs Linux/amd64 natively on Intel, exposes the Docker API |
+| colima (`--vm-type vz`) | VZ backend works through Hypervisor.framework |
+| VirtualBox 7.2.22 | Windows 10 (64-bit, 4 vCPU, 8 GiB) boots to desktop |
+| Android Studio emulator 37.3.10 | Android 17 AVD boots; ADB, input and network work |
+| QEMU 11.1.3 (`-accel hvf`) | Linux boots; Windows 10/11 stop at the Tianocore logo |
+
+These are single-host observations, not a support promise: VirtualBox, Docker Desktop, Android
+Studio and QEMU are **not officially supported clients** of this project. What each
+Hypervisor.framework call answers on a given build is in [docs/CAPABILITIES.md](docs/CAPABILITIES.md),
+and `./build/hvf-probe` prints it live.
 
 ### colima / Kiri (Docker)
 
-- **colima** (QEMU `-accel hvf` backend): full setup guide [docs/COLIMA.md](docs/COLIMA.md). `colima start --vm-type qemu` is the conservative choice; `vz` also runs on AMDHV (it goes through Hypervisor.framework too). Start colima after boot when `kern.hv_support` is 1.
-- **Kiri** (`Virtualization.framework` backend): full setup guide [docs/KIRI.md](docs/KIRI.md). Uses `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64` natively on Intel.
+- **Kiri** (`Virtualization.framework` backend): full setup guide [docs/KIRI.md](docs/KIRI.md). Uses
+  `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes
+  the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64`
+  natively on Intel.
+- **colima**: use `colima start --vm-type vz` — the VZ backend runs through Hypervisor.framework.
+  The old `qemu` VM type is not the recommended path here; see [docs/COLIMA.md](docs/COLIMA.md) for
+  the full setup. Start the VM after boot, when `kern.hv_support` is 1.
 
-What each Hypervisor.framework call answers on a given build: [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and `./build/hvf-probe` prints it live.
+### QEMU is not the supported path
+
+QEMU with `-accel hvf` can run Linux guests here (Lubuntu 24.04 needs `tsc=reliable`), but Windows
+10 and 11 load OVMF, `BOOTX64.EFI` and `cdboot.efi` and then stop at the Tianocore logo — setup
+never starts. This is specific to QEMU's HVF accelerator: Windows boots normally under VirtualBox
+and Android boots under the Android emulator, both through HVF/AMDHV. QEMU also needs the sub-page
+`hv_vm_unmap` rounding in this kext or it aborts with `HV_BAD_ARGUMENT` when creating a TPM device.
+
+The scripts `scripts/sign-qemu.sh` and `scripts/qemu-test.sh` are kept for reference only and are
+not part of the main workflow.
 
 ## Boot-args
 
@@ -91,9 +117,12 @@ the two kexts fight over SVM and only one can register as the hypervisor provide
 - Sleep/wake with a running VM is untested — shut VMs down first.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.
-- Verified on this rewrite: **Zen 2** (Matisse) with macOS Sequoia — `hvf-smoke`, `qemu-test.sh`
-  and colima/Docker all pass. The ported core was additionally tested on a Ryzen 7 5800H by the
-  original RyzenHV project. Re-test on yours with `hvf-smoke` and `qemu-test.sh`.
+- Windows under QEMU is blocked at the Tianocore logo; Windows under VirtualBox works. Neither
+  client is officially supported by this project.
+- Verified on this rewrite: **Zen 2** (Matisse, Ryzen 5 3600) with macOS Sequoia — `hvf-smoke`,
+  `amd-info`, VZ/Docker (Kiri, Docker Desktop), VirtualBox and the Android emulator all work. The
+  ported core was additionally tested on a Ryzen 7 5800H by the original RyzenHV project. Re-test
+  on yours with `hvf-smoke` and `./build/hvf-probe`.
 
 ## Sources
 
@@ -102,8 +131,9 @@ kext/          the kext: SVM, VMCB, VMRUN, nested page tables, the Hypervisor.fr
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
 tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
                hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
-tests/         the 9 unit tests
-scripts/       EFI install, QEMU signing, QEMU boot test, symbol check
+tests/         the 10 unit tests
+scripts/       EFI install, symbol check, legacy QEMU signing/boot test
+docs/          CAPABILITIES.md, COLIMA.md, KIRI.md
 ```
 
 MIT license, see `LICENSE`. Ported from RyzenHV (MIT) — keep that copyright when redistributing.
