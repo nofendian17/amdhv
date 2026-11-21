@@ -31,6 +31,9 @@ Note: the kext Makefile does not track header changes. After editing a `.hpp`, r
 
 ## Install
 
+Raw step-by-step equivalent (mount EFI, copy kext, edit `config.plist` with PlistBuddy, validate):
+[docs/INSTALL_TO_EFI.md](docs/INSTALL_TO_EFI.md).
+
 1. Copy the kext into OpenCore and set the two needed boot-args (keeps a `config.plist.amdhv-backup`):
    ```bash
    ./scripts/install-to-efi.sh /Volumes/EFI
@@ -123,7 +126,8 @@ tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
                hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
 tests/         the 10 unit tests
 scripts/       EFI install, symbol check, legacy QEMU boot test
-docs/          CLIENTS.md (client index), CAPABILITIES.md (API matrix),
+docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
+               CAPABILITIES.md (API matrix),
                DOCKER_DESKTOP.md, KIRI.md, COLIMA.md, VIRTUALBOX.md,
                ANDROID_STUDIO.md, QEMU.md
 ```

@@ -7,7 +7,7 @@
 #
 # Boot-args added: amdhv_enable_svm=1 amdhv_hv=1
 #   amdhv_enable_svm=1  turn SVM on at boot (required)
-#   amdhv_hv=1          register as the Hypervisor.framework provider (required for QEMU)
+#   amdhv_hv=1          register as the Hypervisor.framework provider (required for HVF clients)
 #   kern.hv_support is flipped to 1 by the kext itself once the traps are registered.
 #
 # The kext is loaded unsigned via OpenCore (Kernel -> Add). This script only adds it
