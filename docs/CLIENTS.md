@@ -22,6 +22,9 @@ on a live machine.
 
 ## Before starting any client
 
+Commands below use `build/amd-info` relative to the repo root. If you run them from elsewhere, use
+the absolute path to the `build/amd-info` binary.
+
 ```bash
 sysctl kern.hv_support                 # must be 1
 sudo build/amd-info                    # SVM must be "active on" every CPU

@@ -13,7 +13,7 @@ online, input and network work.
 codesign -d --entitlements - ~/Library/Android/sdk/emulator/qemu/darwin-x86_64/qemu-system-x86_64 \
   | grep hypervisor
 sysctl kern.hv_support                 # must be 1
-sudo ~/amdhv/build/amd-info            # SVM must be "active on" every CPU
+sudo build/amd-info  # SVM must be "active on" every CPU
 ```
 
 Start the emulator after boot.
@@ -49,8 +49,8 @@ Suspend and resume the emulator's `qemu-system-x86_64` process while watching th
 ```bash
 pgrep -fl 'sdk/emulator/qemu.*qemu-system-x86_64'
 # with PID <pid>:
-kill -STOP <pid>; sleep 3; sudo ~/amdhv/build/amd-info stats | grep vmExits   # delta 0
-kill -CONT <pid>; sleep 3; sudo ~/amdhv/build/amd-info stats | grep vmExits   # increases
+kill -STOP <pid>; sleep 3; sudo build/amd-info stats | grep vmExits   # delta 0
+kill -CONT <pid>; sleep 3; sudo build/amd-info stats | grep vmExits   # increases
 ```
 
 In the test, `vmExits` had a delta of 0 while suspended and grew after resume, confirming that the
@@ -63,4 +63,4 @@ emulator runs through HVF/AMDHV. `vmInvalidExits` and `assertFailures` stayed at
 | AVD stays on the boot animation | check `sysctl kern.hv_support` and start the emulator after boot |
 | `adb devices` is empty | wait for boot, then `$ADB devices`; restart adb with `$ADB kill-server && $ADB start-server` |
 | `hv_vm_create` permission denied | the emulator binary lost its `com.apple.security.hypervisor` entitlement (e.g. after a manual copy); reinstall the SDK |
-| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo ~/amdhv/build/amd-info log` |
+| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo build/amd-info log` |

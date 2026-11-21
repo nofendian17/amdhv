@@ -30,7 +30,7 @@ prompt. The serial console (`-serial file:...`) is the easiest way to see where 
 
 With OVMF, the Windows ISO booted to `FS0:\EFI\BOOT\BOOTX64.EFI` via the EFI shell; `cdboot.efi`
 then loaded and the Tianocore logo appeared, but the Windows Setup screen never did. This happened
-for Windows 10 and 11, with std VGA and QXL, with and without a TPM. No host panic, no
+for Windows 10 (no TPM, std VGA and QXL) and Windows 11 (with TPM, std VGA). No host panic, no
 `vmInvalidExits`, no `assertFailures` — the guest simply did not advance.
 
 Do not spend time on QEMU signing or boot-args to fix that: use

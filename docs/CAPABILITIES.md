@@ -34,7 +34,7 @@ argument, so it cannot be "called with FOREVER".) VZ therefore does not depend o
 timer, but the `run_until` path is on its hot path today. A finite deadline is clamped onto the
 core's 10 ms slice and reported as VMX exit reason 52; VZ never asks for one.
 
-## Baseline probe output (AMDHV 0.1.0, before this increment)
+## Baseline probe output (before the fixes in this branch)
 
 ```
 hv_vm_create(HV_VM_ACCEL_APIC)                       HV_UNSUPPORTED
@@ -80,7 +80,7 @@ hv_vm_add_pio_notifier(0x3f8)                        HV_UNSUPPORTED
 hv_vm_remove_pio_notifier(0x3f8)                     HV_UNSUPPORTED
 ```
 
-Two answers in that table are the visible symptoms of the gaps fixed in this increment:
+Two answers in that baseline are the visible symptoms of the gaps fixed in this branch:
 
 - `16 of 64`: the front end reserved 64 slices but the core had `fVcpus[16]`. VZ allows up to 64
   vCPUs (`VZVirtualMachineConfiguration.maximumAllowedCPUCount`), so a large VM could not start.
@@ -95,7 +95,7 @@ Two answers in that table are the visible symptoms of the gaps fixed in this inc
 | --- | --- | --- |
 | `hv_vm_create` | yes | one VM per task; `HV_VM_ACCEL_APIC` is refused with `HV_UNSUPPORTED` |
 | `hv_vm_destroy` | yes | `HV_BUSY` while a vCPU or a trap still holds the VM |
-| `hv_vm_map` / `unmap` / `protect` | yes | 4 KiB aligned, pinned, NPT |
+| `hv_vm_map` / `unmap` / `protect` | yes | map/protect require 4 KiB-aligned ranges; unmap accepts sub-page ranges and rounds them to page boundaries |
 | `hv_vm_sync_tsc` | yes | handed to vCPUs created later too |
 | `hv_vm_space_create` / `map_space` / `protect_space` / `unmap_space` / `space_destroy` | no | stubs answer `HV_UNSUPPORTED` |
 | `hv_vm_add_pio_notifier` / `remove` | no | stubs; VZ uses I/O exits instead |
@@ -118,21 +118,22 @@ Two answers in that table are the visible symptoms of the gaps fixed in this inc
 | `hv_vmx_read_capability` | yes | the VMX capability words VZ/QEMU build their controls from |
 | `hv_vmx_vcpu_read/write_vmcs` | yes | the VMCS shadow in `VmcsState.hpp` |
 
-## This increment
+## What changed in this branch
 
 - `AMDHV_MAX_VCPUS_PER_VM` is 64, matching the 64 slices the front end already reserves and the
-  VZ maximum. The probe should print `64 of 64` after a reboot.
+  VZ maximum. After a reboot the probe prints `64 of 64`.
 - `hv_vcpu_run_until` carries a deadline into `runEx`/`run`. The core clamps it onto its 10 ms
   slice (`RunDeadline.hpp`, covered by `tests/run_deadline_test.cpp`) and reports a deadline-driven
   return as VMX exit reason 52. A past deadline returns without entering the guest. VZ exercises
-  the `HV_DEADLINE_FOREVER` branch of this path on every run (see the trap table above).
+  the `HV_DEADLINE_FOREVER` branch of this path on every run (see the trap table above). The probe
+  now reports `run_until(past deadline)` in microseconds with exit 52.
 - `hv_vcpu_get_exec_time` is real: the core accumulates the time spent inside VMRUN and the front
-  end copies it to ro page offset 0 after every run. The probe should show a non-zero value after
-  the HLT run.
+  end copies it to ro page offset 0 after every run. The probe now shows a non-zero exec time after
+  the HLT run (idle stays 0).
 
-All three are built and host-tested here; the kext still needs a reboot to take effect. After the
-reboot, run `./build/hvf-probe` and compare with the baseline above: the vCPU count, the
-`run_until(past deadline)` line and the exec/idle line should change, everything else should not.
+All three are built, installed and host-tested. Run `./build/hvf-probe` and compare with the
+baseline above: the vCPU count, the `run_until(past deadline)` line and the exec/idle line changed;
+everything else should still match.
 
 ## Guest compatibility seen on this host
 
@@ -156,15 +157,8 @@ kext. The QEMU attempts produced no host panic either.
 
 ### Support status
 
-VirtualBox, Docker Desktop and Android Studio are **not officially supported clients** of this
-project. The results above are informational observations from a single host with the listed client
-versions; they are not a compatibility guarantee and no support is implied.
-
-| client | official support | status on this host |
-| --- | --- | --- |
-| VirtualBox 7.2.22 | no | observed: Windows 10 boots to desktop |
-| Android Studio emulator 37.3.10 | no | observed: Android 17 AVD boots, ADB and input responsive |
-| Docker Desktop | no | observed: engine starts, containers serve traffic |
+None of these clients is officially supported by this project. See the
+[client index](CLIENTS.md) for the per-client status, guides and the shared verification method.
 
 QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding fixed
 (commit `356d903`); without it QEMU aborts with `HV_BAD_ARGUMENT` before the guest starts.

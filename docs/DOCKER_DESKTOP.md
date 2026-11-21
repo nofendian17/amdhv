@@ -12,7 +12,7 @@ nginx container answered HTTP 200 (`nginx/1.31.9`).
 ```bash
 codesign -d --entitlements - /Applications/Docker.app 2>&1 | grep virtualization
 sysctl kern.hv_support                 # must be 1
-sudo ~/amdhv/build/amd-info            # SVM must be "active on" every CPU
+sudo build/amd-info  # SVM must be "active on" every CPU
 ```
 
 Start Docker Desktop **after** boot. See the [README Install section](../README.md#install) if
@@ -44,7 +44,7 @@ curl -sI http://localhost:8080 | head -1     # HTTP/1.1 200 OK
 ## 4. Verify it runs through AMDHV
 
 ```bash
-sudo ~/amdhv/build/amd-info stats            # vmCreates/vmExits grow while the VM runs
+sudo build/amd-info stats  # vmCreates/vmExits grow while the VM runs
                                              # vmInvalidExits and assertFailures must stay 0
 ```
 
@@ -54,4 +54,4 @@ sudo ~/amdhv/build/amd-info stats            # vmCreates/vmExits grow while the 
 |---|---|
 | "stuck starting the engine" | check `sysctl kern.hv_support` and AMDHV boot-args; the LinuxKit guest must boot before the engine comes up |
 | `docker-credential-desktop: executable file not found` | `docker` in PATH is Kiri's CLI; use `~/.docker/bin/docker` or fix PATH |
-| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo ~/amdhv/build/amd-info log` |
+| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo build/amd-info log` |

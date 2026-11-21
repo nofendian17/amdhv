@@ -23,7 +23,7 @@ No QEMU signing is needed for the VZ backend: `limactl` already carries the
 
 ```bash
 sysctl kern.hv_support       # must print 1 (the kext sets it at boot)
-sudo ~/amdhv/build/amd-info  # SVM must be "active on" every CPU
+sudo build/amd-info  # SVM must be "active on" every CPU
 ```
 
 If `kern.hv_support` is 0, the kext is not loaded or the boot-args are missing — see the
@@ -51,7 +51,7 @@ grep vmType ~/.colima/*/colima.yaml
 
 ```bash
 colima status                                 # arch x86_64, runtime docker
-sudo ~/amdhv/build/amd-info stats             # vmRuns grows while the VM runs
+sudo build/amd-info stats  # vmRuns grows while the VM runs
                                               # vmInvalidExits must stay 0
 ~/.docker/bin/docker --context colima run --rm hello-world
 ```
@@ -74,4 +74,4 @@ or set `docker context use colima` with that binary.
 |---|---|
 | `colima status` → "empty value" | the VM never came up: fix the kext first, then `colima start --verbose` |
 | `hv_vm_create` permission denied | the VZ client lacks `com.apple.security.virtualization` — reinstall/re-sign limactl; QEMU signing does not apply to the VZ path |
-| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo ~/amdhv/build/amd-info log` |
+| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo build/amd-info log` |

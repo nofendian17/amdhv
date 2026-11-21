@@ -10,7 +10,7 @@ boots to the desktop.
 
 ```bash
 sysctl kern.hv_support                 # must be 1
-sudo ~/amdhv/build/amd-info            # SVM must be "active on" every CPU
+sudo build/amd-info  # SVM must be "active on" every CPU
 kextstat | grep -i amdhv               # com.amdhv.AMDHV must be loaded
 ```
 
@@ -22,7 +22,6 @@ Start the VM after boot.
 | --- | --- |
 | Guest OS | Windows 10 (64-bit) |
 | CPUs / memory | 4 vCPU, 8192 MiB |
-| Firmware | default (UEFI) |
 | Network | NAT, `cableconnected1=on` |
 | Video | 1024x768x32 |
 | Guest Additions | not installed (`GuestAdditionsRunLevel=0`) |
@@ -37,9 +36,9 @@ A running window is not proof. Pause and resume the VM while watching the kext c
 ```bash
 VBoxManage showvminfo <vm-name> --machinereadable | grep VMState
 VBoxManage controlvm <vm-name> pause
-sudo ~/amdhv/build/amd-info stats | grep vmExits    # stops increasing
+sudo build/amd-info stats | grep vmExits    # stops increasing
 VBoxManage controlvm <vm-name> resume
-sudo ~/amdhv/build/amd-info stats | grep vmExits    # increases again
+sudo build/amd-info stats | grep vmExits    # increases again
 ```
 
 With the VM paused, `vmExits` showed a delta of 0; after resume it grew steadily. No other
