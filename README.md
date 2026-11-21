@@ -107,7 +107,9 @@ the two kexts fight over SVM and only one can register as the hypervisor provide
 ## Limits
 
 - 64 vCPUs per VM (VZ's maximum, and what the front end reserves). One VM program at a time is safest.
-- Sleep/wake with a running VM is untested — shut VMs down first.
+- Sleep/wake with a running VM: a VM that is running when the Mac sleeps waits in `hv_vcpu_run` for
+  the wake instead of failing, and the guest TSC is kept continuous (the host TSC can restart on
+  wake). Not verified on this machine yet — test it before relying on it.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.
 - Windows under QEMU is blocked at the Tianocore logo; Windows under VirtualBox works. Neither

@@ -45,7 +45,8 @@ was used to confirm the VirtualBox and Android results, since a visible window a
 
 - Two hypervisor providers cannot coexist: remove a RyzenHV kext from `EFI/OC/Kexts` and its
   Kernel → Add entry before installing AMDHV.
-- Sleep/wake with a running VM is untested — shut the VM down first.
+- Sleep/wake with a running VM: the VM waits for the wake instead of failing, and the guest TSC is
+  kept continuous. Not verified on this machine yet — shut the VM down first if in doubt.
 - A custom or Homebrew QEMU build may lack `com.apple.security.hypervisor`; MacPorts QEMU already
   has it and needs no signing step. VZ clients instead need `com.apple.security.virtualization`.
 - The `docker` in PATH may point at Kiri's CLI; use `~/.docker/bin/docker` or an explicit
