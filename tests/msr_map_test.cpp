@@ -30,6 +30,12 @@ int main()
     CHECK(info(0xC0000103).kind == K_TSC_AUX); /* TSC_AUX: kept by the kext, swapped around VMRUN */
     CHECK(info(0x80).kind == K_UNKNOWN);
 
+    /* Intel-only speculation MSRs: they stay unknown to the MSR cache and must never go native on AMD. */
+    CHECK(intelOnlySpecMsr(0x48) && intelOnlySpecMsr(0x49));
+    CHECK(!intelOnlySpecMsr(0x10) && !intelOnlySpecMsr(0x1B) && !intelOnlySpecMsr(0x80) &&
+          !intelOnlySpecMsr(MSR_EFER));
+    CHECK(info(0x48).kind == K_UNKNOWN && info(0x49).kind == K_UNKNOWN);
+
     /* MSRPM layout, checked against the manual's examples. */
     uint32_t off; unsigned bit;
     CHECK(msrpmBit(0x00000000, &off, &bit) && off == 0x0000 && bit == 0);

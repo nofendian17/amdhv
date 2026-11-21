@@ -1001,6 +1001,27 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         v->control.eventInjErr = 0;
 
         /*
+         * MSR_IA32_SPEC_CTRL (0x48) and MSR_IA32_PRED_CMD (0x49) are Intel-only: the AMD CPU has no
+         * such MSR, so a native RDMSR/WRMSR raises #GP in the guest. msrOp() reports the client's
+         * enable_native_msr call as successful but keeps the MSRPM intercept; handle the exit here
+         * as a no-op instead. A Linux guest writes PRED_CMD on each secondary CPU while booting
+         * (write_ibpb) and panics if that write ever reaches the hardware.
+         */
+        if (code == EXIT_MSR && (fGprs.rcx == 0x48 || fGprs.rcx == 0x49)) {
+            static volatile SInt32 logged;
+            if (OSIncrementAtomic(&logged) <= 4)
+                AMDHV_INFO("VmRun: emulated guest access to Intel-only MSR %#llx on AMD",
+                           (unsigned long long)fGprs.rcx);
+            if (!(v->control.exitInfo1 & 1)) {   /* RDMSR: EDX:EAX = 0 */
+                v->save.rax = 0;
+                fGprs.rdx   = 0;
+            }
+            v->save.rip  = v->control.nextRip ? v->control.nextRip : v->save.rip + v->control.insnLen;
+            fHaveNextRip = false;
+            continue;
+        }
+
+        /*
          * The guest executed an SVM instruction (VMRUN, VMLOAD, VMSAVE, STGI, CLGI, SKINIT). A Hypervisor.framework
          * client's guest has no such instructions, so what it would see on Intel with VMX off is #UD: inject that
          * and let the guest handle it.
@@ -1165,11 +1186,19 @@ IOReturn com_amdhv_AMDHVVm::msrOp(uint32_t op, uint32_t msrNum, uint64_t value, 
         break;
     }
     case AMDHV_MSR_NATIVE_ENABLE:
-    case AMDHV_MSR_NATIVE_DISABLE:
+    case AMDHV_MSR_NATIVE_DISABLE: {
+        const bool enable = op == AMDHV_MSR_NATIVE_ENABLE;
         /* The guest EFER must keep SVME set, so it can never be written without an exit. */
-        if (mi.kind == K_EFER || !setNative((uint8_t *)fMsrpm.va, msrNum, op == AMDHV_MSR_NATIVE_ENABLE))
+        if (mi.kind == K_EFER)
+            rc = kIOReturnBadArgument;
+        else if (enable && amdhv::msr::intelOnlySpecMsr(msrNum)) {
+            /* Answer success so the client believes the MSR is native, but leave the MSRPM intercept
+             * set: run() emulates the access as a no-op. On AMD these MSRs do not exist, so executing
+             * them natively would #GP inside the guest. */
+        } else if (!setNative((uint8_t *)fMsrpm.va, msrNum, enable))
             rc = kIOReturnBadArgument;
         break;
+    }
     default:
         rc = kIOReturnBadArgument;
     }
