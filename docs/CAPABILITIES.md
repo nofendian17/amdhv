@@ -134,6 +134,28 @@ All three are built and host-tested here; the kext still needs a reboot to take 
 reboot, run `./build/hvf-probe` and compare with the baseline above: the vCPU count, the
 `run_until(past deadline)` line and the exec/idle line should change, everything else should not.
 
+## Guest compatibility seen on this host
+
+Hypervisor.framework clients other than VZ were also exercised on an AMD Ryzen 5 3600 host with
+AMDHV 0.1.0 loaded:
+
+| guest | client | result |
+| --- | --- | --- |
+| Windows 10 (64-bit), 4 vCPU, 8 GiB | VirtualBox 7.2.22 | boots to desktop; Task Manager reports 4 vCPUs and uptime advances |
+| LinuxKit / Docker Desktop | VZ | works; engine starts and containers serve traffic |
+| Lubuntu 24.04, 4 vCPU, QEMU `tsc=reliable` | QEMU 11.1.3 `-accel hvf` | boots to login prompt |
+| Windows 10 and 11 | QEMU 11.1.3 `-accel hvf` | OVMF, `BOOTX64.EFI` and `cdboot.efi` load and the Tianocore logo appears, but setup never starts |
+
+The VirtualBox result is not a guess from the window being open: `com.amdhv.AMDHV`'s `vmExits`
+counter stops increasing when the VM is paused and resumes increasing when it is resumed, and no
+other VBox kernel extension is loaded. So Windows does run through HVF/AMDHV — the QEMU hang is
+specific to QEMU's HVF accelerator, not a missing capability in this kext. The QEMU attempts
+produced no host panic and no `vmInvalidExits` or `assertFailures` in AMDHV.
+
+These are observations from one host and the listed client versions, not a general support
+statement. QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding fixed
+(commit `356d903`); without it QEMU aborts with `HV_BAD_ARGUMENT` before the guest starts.
+
 ## A framework quirk worth knowing
 
 Calling `hv_vm_create` a second time in one task answers `HV_BUSY` (correct), but then
