@@ -12,8 +12,9 @@
  * Build:  make tools
  * Run:    ./build/hvf-probe            (needs the com.apple.security.hypervisor entitlement)
  *
- * Two probes need a task with no VM of its own and run in a forked child:
+ * Three probes need a task with no VM of its own and run in a forked child:
  *   - hv_vm_create(HV_VM_ACCEL_APIC), which a client that wants the in-kernel APIC passes;
+ *   - a second hv_vm_create in the same task, which must answer HV_BUSY;
  *   - the vCPU-count probe, which creates one vCPU per thread (the API binds a vCPU to a thread).
  */
 #include <Hypervisor/Hypervisor.h>

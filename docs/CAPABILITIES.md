@@ -9,8 +9,8 @@ make tools
 ./build/hvf-probe          # needs the com.apple.security.hypervisor entitlement, already applied
 ```
 
-The probe forks/execs itself for the two probes that need a task without a VM (the in-kernel APIC
-variant and the vCPU count). Everything else runs in one task.
+The probe forks/execs itself for the three probes that need a task without a VM (the in-kernel APIC
+variant, a second `hv_vm_create`, and the vCPU count). Everything else runs in one task.
 
 ## What VZ actually calls
 
