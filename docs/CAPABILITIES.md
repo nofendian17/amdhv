@@ -118,6 +118,26 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vmx_read_capability` | yes | the VMX capability words VZ/QEMU build their controls from |
 | `hv_vmx_vcpu_read/write_vmcs` | yes | the VMCS shadow in `VmcsState.hpp` |
 
+## Capability words follow the implementation
+
+`hv_vmx_read_capability` no longer returns a fixed copy of an Intel Mac's words. `kext/Source/VmcsCaps.hpp`
+derives each control word from what the kext actually implements, so a client that canonicalises its
+controls through `cap2ctrl` (QEMU, the Android emulator, the smoke test) cannot ask for a feature that
+would only be shadowed:
+
+| word | offered now | no longer offered |
+| --- | --- | --- |
+| pin-based | external-interrupt and NMI exiting | virtual NMIs, preemption timer, posted interrupts |
+| primary | TSC offsetting, HLT/INVLPG/MWAIT/RDPMC/RDTSC, CR3/CR8 exiting, MOV-DR, I/O exiting, MONITOR/PAUSE, NMI-window, secondary controls, TPR shadow (switch permitting) | I/O bitmaps, MSR bitmaps, monitor trap flag |
+| secondary | EPT/NPT, RDTSCP, WBINVD exiting, unrestricted guest, INVPCID | VPID, virtual APIC/x2APIC, virtual-interrupt delivery, PLE, PML, #VE, TSC scaling, ... |
+| EPT/VPID | 4-level walk, WB memory | execute-only, 2 MiB/1 GiB leaves, INVEPT, A/D bits |
+
+Virtual NMIs, I/O bitmaps, MSR bitmaps and VPID are still **accepted** as compatibility no-ops (the old
+table advertised them, and VirtualBox/QEMU may write them directly), but they are not advertised. A
+control write with any other unadvertised bit is refused by `VmcsState::write()` and logged by the front
+end instead of being silently stored; `tests/vmcs_state_test.cpp` covers both the words and the refusal.
+NMI-window exiting stays advertised because `Frontend.cpp` answers it immediately.
+
 ## What changed in this branch
 
 - `AMDHV_MAX_VCPUS_PER_VM` is 64, matching the 64 slices the front end already reserves and the

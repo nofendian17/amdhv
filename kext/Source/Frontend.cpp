@@ -17,6 +17,7 @@
 #include "AMDHV.hpp"
 #include "KernelDecls.hpp"
 #include "Vm.hpp"
+#include "VmcsCaps.hpp"
 #include "Log.hpp"
 
 /*
@@ -127,10 +128,8 @@ constexpr uint32_t kInfoBytes = 0x118;
 
 /* VMX capability words offered to the client, indexed by HV_VMX_CAP_*: low 32 bits are the "must be 1" settings,
  * high 32 bits the "may be 1" settings, the same numbers hv_vmx_read_capability returns. */
-const uint64_t kCaps[17] = {
-    0x3f00000016ull, 0xf7d9fffe04006172ull, 0x10ea00000000ull, 0xd3ff000011ffull, 0x3fefff00036dffull, 0x98100000000001ull,
-    0x3f00000016ull, 0xf7d9fffe04006172ull, 0xd3fb000011fbull, 0x3feffb00036dfbull, 0x40040ull, 0x20ull, 0xffffffffull, 0ull,
-    0xffffffull, 0x5cull, 0xf0106114040ull};
+/* The VMX capability words come from VmcsCaps.hpp, derived from the controls this kext implements. A word is built per VM
+ * so that the TPR-shadow switch is reflected in the VMs created after it changes. */
 
 /* VMs that exist. The kernel calls the callbacks WITHOUT a NULL check for every thread and task that has a target, so while this is above 0 the
  * callbacks must stay registered: unregistering is refused. */
@@ -180,7 +179,7 @@ struct HvVm {
     uint32_t roArrOff;                         /* offset of the per-vCPU 4 KiB pages (managed MSR lists) in the ro area */
     uint64_t tscOffset;                        /* from hv_vm_sync_tsc, handed to vCPUs created later */
     bool     tscValid;
-    uint64_t caps[17];                         /* the VMX capability words this VM's client was shown (HV_VMX_CAP_*), also what thread trap 12 answers from */
+    uint64_t caps[amdhv::vmx::CAP_COUNT];      /* the VMX capability words this VM's client was shown (HV_VMX_CAP_*), also what thread trap 12 answers from */
     HvVcpu *vcpu[kMaxVcpus];
     uint32_t nVcpus;
 };
@@ -301,14 +300,10 @@ HvVm *vmCreate(uint64_t *info)
     info[0x10 / 8] = fpStride;
     info[0x18 / 8] = roOffArr;
     info[0x20 / 8] = 0x1000;
-    uint64_t caps[17];
-    for (unsigned c = 0; c < 17; c++)
-        caps[c] = kCaps[c];
-    if (gTprShadow) {
-        caps[1] |= 1ull << (32 + 21);                /* PROCBASED and TRUE_PROCBASED: allowed-1 for "use TPR shadow" (the framework does not strip it) */
-        caps[7] |= 1ull << (32 + 21);
-    }
-    for (unsigned c = 0; c < 17; c++) {
+    uint64_t caps[amdhv::vmx::CAP_COUNT];
+    for (unsigned c = 0; c < amdhv::vmx::CAP_COUNT; c++)
+        caps[c] = amdhv::vmx::capability(c, gTprShadow != 0);
+    for (unsigned c = 0; c < amdhv::vmx::CAP_COUNT; c++) {
         info[(0x28 + 8 * c) / 8] = caps[c];
         vm->caps[c] = caps[c];
     }
@@ -571,15 +566,7 @@ kern_return_t tCapWrite(void *target, uint64_t slot)
     if (slot >= kCacheSlots)
         return kHvBadArg;
     uint64_t lo = 0, hi = ~0ull, valid;
-    int ci = -1;
-    switch (amdhv::hv::kSlotField[slot]) {
-    case 0x4000: ci = 0; break;      /* pin-based */
-    case 0x4002: ci = 1; break;      /* processor-based */
-    case 0x401e: ci = 2; break;      /* secondary processor-based */
-    case 0x4012: ci = 3; break;      /* VM entry */
-    case 0x400c: ci = 4; break;      /* VM exit */
-    default: break;
-    }
+    int ci = amdhv::vmx::capIndexForControl(amdhv::hv::kSlotField[slot]);
     if (ci >= 0) {
         lo = v->vm->caps[ci] & 0xFFFFFFFFull;
         hi = v->vm->caps[ci] >> 32;

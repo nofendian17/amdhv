@@ -100,7 +100,7 @@ void testShadowAndErrors()
     CHECK(f.st.write(0x401e, 0x82) == R_OK && rd(f, 0x401e) == 0x82);
     CHECK(f.st.write(0x6004, 0x80050033) == R_OK && rd(f, 0x6004) == 0x80050033);           /* CR0 shadow */
     CHECK(f.st.write(0x2000, 0xAAAA0000ull) == R_OK && rd(f, 0x2000) == 0xAAAA0000ull);   /* IO bitmap A */
-    CHECK(f.st.write(0x4000, 0x1FFFFFFFFull) == R_OK && rd(f, 0x4000) == 0xFFFFFFFF);     /* 32-bit control is masked */
+    CHECK(f.st.write(0x4000, 0x100000016ull) == R_OK && rd(f, 0x4000) == 0x16);     /* 32-bit control is masked */
 
     /* Unknown encodings. */
     CHECK(f.st.read(0x1, &v) == R_INVALID_FIELD && f.st.write(0x7000, 1) == R_INVALID_FIELD);
@@ -361,11 +361,57 @@ void testShimFieldTable()
     CHECK(amdhv_vmcs_write_status(0xF002, 0x0000800000000000ull) == AMDHV_FIELD_OK);            /* DR6 is not loaded */
 }
 
+void testCapabilities()
+{
+    /* Pin-based: allowed-0 0x16, allowed-1 0x1f. External interrupts and NMIs are offered; virtual NMIs are not. */
+    CHECK(capability(CAP_PINBASED, true) == 0x0000001f00000016ull);
+    CHECK(capability(CAP_TRUE_PINBASED, true) == capability(CAP_PINBASED, true));
+
+    /* Primary: I/O and MSR bitmaps are no longer advertised; the TPR shadow follows the switch. */
+    CHECK(capability(CAP_PROCBASED, false) == 0xe5d9fffe04006172ull);
+    CHECK(capability(CAP_PROCBASED, true) == 0xe5f9fffe04006172ull);
+    CHECK((capability(CAP_PROCBASED, true) & (1ull << (32 + 21))) != 0);
+    CHECK((capability(CAP_PROCBASED, false) & (1ull << (32 + 21))) == 0);
+
+    /* Secondary: VPID is gone; EPT/NPT, RDTSCP, WBINVD, unrestricted guest and INVPCID remain. */
+    CHECK(capability(CAP_PROCBASED2, true) == 0x000010ca00000000ull);
+
+    /* NPT is a 4-level walk with WB memory: no 2 MiB/1 GiB leaves, INVEPT, execute-only or A/D bits. */
+    CHECK(capability(CAP_EPT_VPID_CAP, true) == 0x4040);
+
+    /* Compatibility bits are accepted but not advertised. */
+    CHECK(controlAllowed(C_PIN_BASED, bit(5), true));               /* virtual NMIs */
+    CHECK((capability(CAP_PINBASED, true) >> 32 & bit(5)) == 0);
+    CHECK(controlAllowed(C_CPU_BASED, bit(22), true));              /* NMI-window exiting is offered */
+    CHECK(controlAllowed(C_CPU_BASED, bit(25), true));              /* I/O bitmaps */
+    CHECK(controlAllowed(C_CPU_BASED, bit(28), true));              /* MSR bitmaps */
+    CHECK(controlAllowed(C_CPU_BASED2, bit(5), true));              /* old VPID bit */
+    CHECK(controlAllowed(C_CPU_BASED, bit(21), false));             /* TPR shadow with the switch off */
+
+    /* Genuinely unimplemented controls are refused instead of being shadowed. */
+    CHECK(!controlAllowed(C_CPU_BASED, bit(17), true));             /* tertiary controls */
+    CHECK(!controlAllowed(C_CPU_BASED2, bit(0), true));             /* virtualize APIC accesses */
+    CHECK(!controlAllowed(C_CPU_BASED2, bit(9), true));             /* virtual-interrupt delivery */
+    CHECK(!controlAllowed(C_CPU_BASED, bit(17) | bit(21), true));
+
+    /* VmcsState::write() applies the same rule. */
+    Fixture f;
+    CHECK(f.st.write(0x4000, bit(5)) == R_OK);
+    CHECK(f.st.write(0x4002, bit(25)) == R_OK);
+    CHECK(f.st.write(0x401e, bit(5)) == R_OK);
+    CHECK(f.st.write(0x4002, bit(17)) == R_INVALID_FIELD);
+    CHECK(f.st.write(0x401e, bit(0)) == R_INVALID_FIELD);
+    f.st.setTprShadow(false);
+    CHECK(f.st.write(0x4002, bit(21)) == R_OK);
+    CHECK(f.st.write(0x4002, bit(21) | bit(17)) == R_INVALID_FIELD);
+}
+
 } // namespace
 
 int main()
 {
     testShimFieldTable();
+    testCapabilities();
     testStateFields();
     testShadowAndErrors();
     testInterruptibility();
