@@ -152,8 +152,20 @@ other VBox kernel extension is loaded. So Windows does run through HVF/AMDHV —
 specific to QEMU's HVF accelerator, not a missing capability in this kext. The QEMU attempts
 produced no host panic and no `vmInvalidExits` or `assertFailures` in AMDHV.
 
-These are observations from one host and the listed client versions, not a general support
-statement. QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding fixed
+### Support status
+
+VirtualBox, Docker Desktop and Android Studio are **not officially supported clients** of this
+project. The results above are informational observations from a single host with the listed client
+versions; they are not a compatibility guarantee and no support is implied. Android Studio was
+**not tested** — there is no recorded result for its AVD guests.
+
+| client | official support | status on this host |
+| --- | --- | --- |
+| VirtualBox 7.2.22 | no | observed: Windows 10 boots to desktop |
+| Docker Desktop | no | observed: engine starts, containers serve traffic |
+| Android Studio | no | not tested |
+
+QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding fixed
 (commit `356d903`); without it QEMU aborts with `HV_BAD_ARGUMENT` before the guest starts.
 
 ## A framework quirk worth knowing
