@@ -138,6 +138,19 @@ control write with any other unadvertised bit is refused by `VmcsState::write()`
 end instead of being silently stored; `tests/vmcs_state_test.cpp` covers both the words and the refusal.
 NMI-window exiting stays advertised because `Frontend.cpp` answers it immediately.
 
+### Verified with 0.1.2
+
+The rebuilt kext was installed to the EFI partition and loaded after a reboot on 2026-11-22:
+
+- `make test`: all host tests pass, including the new capability and control-rejection checks.
+- `hvf-smoke`: `PASS: a VMM written against the public Hypervisor.framework API works`.
+- `hvf-probe`: `64 of 64` vCPUs, `run_until(past deadline)` returns in microseconds with exit 52,
+  and exec time is non-zero.
+- Android emulator 37.3.10: the Android 17 AVD boots to the launcher; ADB, input and network work.
+- VirtualBox 7.2.22: a Lubuntu 24.04 live guest (2 vCPU, 2 GiB) reaches the installer with NAT
+  connected; pausing the VM stops the AMDHV exit counter and resuming restarts it.
+- `vmInvalidExits` and `assertFailures` stayed 0 and no new panic log was written.
+
 ## What changed in this branch
 
 - `AMDHV_MAX_VCPUS_PER_VM` is 64, matching the 64 slices the front end already reserves and the
@@ -163,7 +176,8 @@ the 0.1.x kext loaded:
 | guest | client | result |
 | --- | --- | --- |
 | Windows 10 (64-bit), 4 vCPU, 8 GiB | VirtualBox 7.2.22 | boots to desktop; Task Manager reports 4 vCPUs and uptime advances |
-| Android 17 AVD (`Medium_Phone_API_37.0`) | Android Studio emulator 37.3.10 | boots to launcher; ADB online, input, UI and network work |
+| Lubuntu 24.04 live, 2 vCPU, 2 GiB | VirtualBox 7.2.22 | reaches the installer; NAT connected; pause/resume stops and restarts the exit counter (0.1.2) |
+| Android 17 AVD (`Medium_Phone_API_37.0`) | Android Studio emulator 37.3.10 | boots to launcher; ADB online, input, UI and network work (re-checked on 0.1.2) |
 | LinuxKit / Docker Desktop | VZ | works; engine starts and containers serve traffic |
 | Lubuntu 24.04, 4 vCPU, QEMU `tsc=reliable` | QEMU 11.1.3 `-accel hvf` | boots to login prompt |
 | Windows 10 and 11 | QEMU 11.1.3 `-accel hvf` | OVMF, `BOOTX64.EFI` and `cdboot.efi` load and the Tianocore logo appears, but setup never starts |
