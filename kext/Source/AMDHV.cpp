@@ -113,6 +113,10 @@ IOReturn com_amdhv_AMDHV::sleepWakeHandler(void *target, void *, UInt32 messageT
         AMDHV_STAT_INC(sleepEvents);
         amdhv::svm::suspend();
         break;
+    case kIOMessageSystemWillNotSleep:
+        /* The sleep was cancelled: without this, a VmRun waiting in waitResumed() would never be woken. */
+        amdhv::svm::resume();
+        break;
     case kIOMessageSystemHasPoweredOn:
         AMDHV_STAT_INC(wakeEvents);
         if (amdhv::svm::resume() && me->fSelfTest) {

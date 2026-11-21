@@ -52,6 +52,7 @@ enum : uint32_t {
     F_GUEST_INTERRUPTIBILITY = 0x4824,
     F_GUEST_ACTIVITY     = 0x4826,
     F_GUEST_EFER         = 0x2806,
+    F_CTRL_TSC_OFFSET    = 0x2010,
     F_GUEST_RIP          = 0x681e
 };
 

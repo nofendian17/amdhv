@@ -120,6 +120,13 @@ public:
     /* The Hypervisor.framework (VMX-shaped) view of the guest. */
     IOReturn vmcsRead(uint32_t field, uint64_t *value);
     IOReturn vmcsWrite(uint32_t field, uint64_t value);
+    /*
+     * hv_vm_sync_tsc: the client sets an absolute TSC offset computed from the host TSC it read, so
+     * what it wrote already accounts for any TSC repair a sleep left pending. Both happen under one
+     * lock: a run() that slipped in between would add the pending repair to the client's offset and
+     * then mark it applied, counting it twice.
+     */
+    IOReturn syncTscOffset(uint64_t offset);
 
     /* Guest x87/SSE/AVX state and XCR0. */
     IOReturn msrOp(uint32_t op, uint32_t msr, uint64_t value, uint64_t *out);
@@ -155,6 +162,7 @@ private:
     amdhv::PhysMem              fHostFpu, fGuestFpu, fScratchFpu;   /* XSAVE areas, 4 KiB aligned */
     uint64_t                  fGuestXcr0;
     uint64_t                  fXcr0Supported;    /* CPUID.0xD.0 EDX:EAX */
+    uint64_t                  fTscApplied;       /* svm::tscAdjustment() already added to this vCPU's TSC offset */
     bool                      fHasTscAux;        /* the CPU has RDTSCP, so IA32_TSC_AUX */
     uint32_t                  fFpuSize;
     volatile uint32_t         fKick;

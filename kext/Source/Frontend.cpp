@@ -694,7 +694,7 @@ kern_return_t tVmSyncTsc(void *target, uint64_t tsc)
     vm->tscValid = true;
     for (unsigned id = 0; id < kMaxVcpus; id++)
         if (vm->vcpu[id] && vm->vcpu[id]->cpu)
-            vm->vcpu[id]->cpu->vmcsWrite(0x2010, offset);
+            vm->vcpu[id]->cpu->syncTscOffset(offset);
     IOLockUnlock(vm->lock);
     return kHvOk;
 }

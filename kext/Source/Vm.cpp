@@ -4,6 +4,7 @@
 #include "Frontend.hpp"
 #include "MsrMap.hpp"
 #include "RunDeadline.hpp"
+#include "TscAdjust.hpp"
 #include "X86.hpp"
 #include "Log.hpp"
 #include "SVM.hpp"
@@ -524,6 +525,7 @@ bool com_amdhv_AMDHVVm::init()
     fKick          = 0;
     fHasTscAux     = false;
     fRunCpu        = -1;
+    fTscApplied    = 0;
     fFirstRun    = true;
     fHaveNextRip = false;
     fExecAbs     = 0;
@@ -829,8 +831,17 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
 
     bool rescanned  = false;          /* CPUs that came online after the kext started: look for them once per run */
     bool needRescan = false;
+    bool needWake   = false;          /* the host is going to sleep or just woke: wait for the SVM code to be back on */
 
     for (;;) {
+        if (needWake) {               /* interrupts on, no page-table lock held */
+            needWake = false;
+            rc = svm::waitResumed();
+            if (rc != kIOReturnSuccess) {
+                AMDHV_WARN("VmRun: wait for wake aborted, not entering the guest");
+                break;
+            }
+        }
         if (needRescan) {             /* outside the page-table lock and with interrupts on: it runs a rendezvous and may allocate */
             needRescan = false;
             /* Deadlock guard: rescan() takes gRescanLock and does mp_rendezvous_no_intrs, which needs every
@@ -889,6 +900,12 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             ml_set_interrupts_enabled(ints);
             continue;
         }
+        if (svm::suspended()) {       /* sleep: the guest resumes after wake instead of failing the client's hv_vcpu_run */
+            fRunCpu = -1;
+            ml_set_interrupts_enabled(ints);
+            needWake = true;
+            continue;
+        }
         if (!svm::activeOnAllUsable() && !rescanned) {
             fRunCpu = -1;
             ml_set_interrupts_enabled(ints);
@@ -902,6 +919,17 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             AMDHV_ERR("VmRun: SVM was turned off under us (sleep?), not entering the guest");
             rc = kIOReturnNotReady;
             break;
+        }
+
+        /*
+         * The host TSC went back across a sleep: move this guest's TSC offset by the same amount, so the
+         * guest's clock does not freeze until the host TSC has caught up. Interrupts are off, so no sleep
+         * can start between reading the total and entering the guest.
+         */
+        const uint64_t tscAdj = svm::tscAdjustment();
+        if (tscAdj != fTscApplied) {
+            v->control.tscOffset += amdhv::tsc::pending(tscAdj, fTscApplied);
+            fTscApplied = tscAdj;
         }
 
         /* activeOnAllUsable() counts what enableAll() did; this looks at THIS cpu's EFER, because CLGI without SVME is a #UD panic. */
@@ -1313,6 +1341,16 @@ IOReturn com_amdhv_AMDHVVm::vmcsWrite(uint32_t field, uint64_t value)
     case amdhv::vmx::R_READ_ONLY:  return kIOReturnNotWritable;
     default:                     return kIOReturnBadArgument;
     }
+}
+
+IOReturn com_amdhv_AMDHVVm::syncTscOffset(uint64_t offset)
+{
+    IOLockLock(fLock);
+    amdhv::vmx::Result r = fVmcs.write(amdhv::vmx::F_CTRL_TSC_OFFSET, offset);
+    if (r == amdhv::vmx::R_OK)
+        fTscApplied = amdhv::svm::tscAdjustment();
+    IOLockUnlock(fLock);
+    return r == amdhv::vmx::R_OK ? kIOReturnSuccess : kIOReturnBadArgument;
 }
 
 void com_amdhv_AMDHVVm::dumpVmcb(const char *why)

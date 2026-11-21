@@ -4,6 +4,8 @@
 #ifndef AMDHV_SVM_HPP
 #define AMDHV_SVM_HPP
 
+#include <IOKit/IOReturn.h>
+
 #include "../../include/AMDHVShared.h"
 
 namespace amdhv {
@@ -30,9 +32,28 @@ void disableAll();
 /*
  * Sleep support. suspend() turns SVM off on all CPUs but keeps the host save
  * areas; resume() turns it back on. Both are no-ops when SVM was never enabled.
+ * A VmRun that finds SVM off because of suspend() waits for resume() instead of
+ * failing the client's hv_vcpu_run.
  */
 void     suspend();
 uint32_t resume();
+
+/*
+ * Total ticks the host TSC was behind after the wakes so far (0 if it never went back). A vCPU adds
+ * the difference between this and what it has added already to its TSC offset, so the guest's TSC
+ * keeps going across sleep. Wraps like the offset does.
+ */
+uint64_t tscAdjustment();
+
+/* True between suspend() and the end of resume(). Lock-free. */
+bool suspended();
+
+/*
+ * For a VMRUN caller that found SVM off while suspended() is true: sleeps (interrupts on) until
+ * resume() has finished. No time limit; returns kIOReturnAborted if the thread is aborted (the
+ * client is being killed). Success at once when not suspended.
+ */
+IOReturn waitResumed();
 
 /*
  * Reads EFER and VM_HSAVE_PA back on every CPU and checks they hold what
