@@ -384,14 +384,23 @@ IOReturn com_amdhv_AMDHVVmShared::map(task_t task, uint64_t uva, uint64_t gpa, u
 
 IOReturn com_amdhv_AMDHVVmShared::unmap(uint64_t gpa, uint64_t size)
 {
-    if (size == 0 || ((gpa | size) & 0xFFF) || gpa >= amdhv::npt::kGpaLimit ||
+    if (size == 0 || gpa >= amdhv::npt::kGpaLimit ||
         size > amdhv::npt::kGpaLimit - gpa)
         return kIOReturnBadArgument;
 
+    /*
+     * HVF clients unmap sub-page MMIO ranges: QEMU's TPM TIS uses 0xfed45000, 0x400
+     * bytes. Apple's framework rounds those to whole pages; do the same here instead
+     * of refusing with HV_BAD_ARGUMENT (which aborts the guest's device setup).
+     * Unmapping a page that was never mapped is a no-op in Npt::unmap().
+     */
+    const uint64_t first = gpa & ~(uint64_t)0xFFF;
+    const uint64_t last  = (gpa + size + 0xFFF) & ~(uint64_t)0xFFF;
+
     kickAll();
     IORWLockWrite(fRw);
-    for (uint64_t off = 0; off < size; off += 4096) {
-        void *owner = fNpt.unmap(gpa + off);
+    for (uint64_t page = first; page < last; page += 4096) {
+        void *owner = fNpt.unmap(page);
         if (owner) {
             fPagesMapped--;
             AMDHV_STAT_ADD(vmPagesMapped, -1);
