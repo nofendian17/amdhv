@@ -74,6 +74,17 @@ static inline Info info(uint32_t msr)
     }
 }
 
+/*
+ * MSR_IA32_SPEC_CTRL (0x48) and MSR_IA32_PRED_CMD (0x49) are Intel-only. AMD has no such MSR, so
+ * letting a guest execute RDMSR/WRMSR on them natively raises #GP in the guest (Linux then panics in
+ * write_ibpb()). VZ asks to make them native; the kext reports success but keeps them intercepted
+ * and emulates the access in run() instead.
+ */
+static inline bool intelOnlySpecMsr(uint32_t msr)
+{
+    return msr == 0x48 || msr == 0x49;
+}
+
 /* Is `msr` an address a guest could even write to the 8 KiB map? */
 static const size_t kMsrpmSize = 8192;
 

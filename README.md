@@ -1,6 +1,7 @@
 # AMDHV
 
-Run QEMU with `-accel hvf` on a **Hackintosh with an AMD CPU**.
+Run **Hypervisor.framework** guests on a **Hackintosh with an AMD CPU** — Docker/VZ, VirtualBox and
+the Android emulator.
 
 AMDHV is a kernel extension. At boot it registers with macOS **in place of Apple's AppleHV**, so the
 unmodified Hypervisor.framework talks to it. The hardware work is done by AMD-V (SVM).
@@ -14,18 +15,24 @@ It is a simplified rewrite of the RyzenHV project: native mode only, no shim, no
 - "SVM Mode" **enabled in the BIOS**.
 - Xcode command line tools (`xcode-select --install`).
 - OpenCore.
-- QEMU (MacPorts: `sudo port install qemu`).
+
+A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop, Kiri or
+colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longer a target — see
+[QEMU is not the supported path](#qemu-is-not-the-supported-path).
 
 ## Build
 
 ```bash
-make test          # 8 unit tests, runs anywhere
-make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke
+make test          # 10 unit tests, runs anywhere
+make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
 Note: the kext Makefile does not track header changes. After editing a `.hpp`, run `rm -rf build/kext-obj` first.
 
 ## Install
+
+Raw step-by-step equivalent (mount EFI, copy kext, edit `config.plist` with PlistBuddy, validate):
+[docs/INSTALL_TO_EFI.md](docs/INSTALL_TO_EFI.md).
 
 1. Copy the kext into OpenCore and set the two needed boot-args (keeps a `config.plist.amdhv-backup`):
    ```bash
@@ -41,16 +48,30 @@ Note: the kext Makefile does not track header changes. After editing a `.hpp`, r
 
 ## Run a VM
 
-```bash
-./scripts/sign-qemu.sh           # gives QEMU the hypervisor entitlement (again after every upgrade)
-./scripts/qemu-test.sh           # boots a test Linux — everything is working
-qemu-system-x86_64 -accel hvf -cpu host -smp 4 -m 8G -drive file=win10.qcow2,if=virtio
-```
+Per-client guides: [docs/CLIENTS.md](docs/CLIENTS.md).
 
-### colima / Kiri (Docker)
+| client | guide | observed on this host |
+| --- | --- | --- |
+| Docker Desktop 4.100.0 (VZ) | [DOCKER_DESKTOP.md](docs/DOCKER_DESKTOP.md) | engine works; containers serve traffic |
+| Kiri 0.2.2 (VZ) | [KIRI.md](docs/KIRI.md) | Linux/amd64 natively on Intel; Docker API works |
+| colima 0.10.3 (`--vm-type vz`) | [COLIMA.md](docs/COLIMA.md) | 4 vCPU/8 GiB VM starts; `docker run hello-world` succeeds |
+| VirtualBox 7.2.22 | [VIRTUALBOX.md](docs/VIRTUALBOX.md) | Windows 10 (64-bit, 4 vCPU, 8 GiB) boots to desktop |
+| Android Studio emulator 37.3.10 | [ANDROID_STUDIO.md](docs/ANDROID_STUDIO.md) | Android 17 AVD boots; ADB, input and network work |
+| QEMU 11.1.3 (`-accel hvf`) | [QEMU.md](docs/QEMU.md) | Linux boots; Windows 10/11 stop at the Tianocore logo |
 
-- **colima** (QEMU `-accel hvf` backend): full setup guide [docs/COLIMA.md](docs/COLIMA.md). Use `colima start --vm-type qemu` (`vz` is unsupported on AMD). Start colima after boot when `kern.hv_support` is 1.
-- **Kiri** (`Virtualization.framework` backend): full setup guide [docs/KIRI.md](docs/KIRI.md). Uses `VZVirtualMachine` (which requires `amdhv_hv=1` and `com.apple.security.virtualization`), exposes the Docker API at `~/.kiri/run/docker.sock` (`docker --context kiri`), and runs `linux/amd64` natively on Intel.
+These are single-host observations, not a support promise: colima, VirtualBox, Docker Desktop,
+Android Studio and QEMU are **not officially supported clients** of this project. Each guide covers
+install, verification through AMDHV and troubleshooting. What each Hypervisor.framework call answers
+on a given build is in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and `./build/hvf-probe` prints
+it live. Start the client after boot, when `kern.hv_support` is 1.
+
+### QEMU is not the supported path
+
+QEMU with `-accel hvf` runs Linux guests here (Lubuntu 24.04 needs `tsc=reliable`), but Windows
+10 and 11 stop at the Tianocore logo after `cdboot.efi` loads — setup never starts. Windows works
+under VirtualBox and Android works under the Android emulator through the same HVF/AMDHV stack, so
+this is QEMU-specific. See [docs/QEMU.md](docs/QEMU.md) for details; `scripts/qemu-test.sh` is kept
+for reference only and no signing step is needed with MacPorts QEMU.
 
 ## Boot-args
 
@@ -85,22 +106,30 @@ the two kexts fight over SVM and only one can register as the hypervisor provide
 
 ## Limits
 
-- 16 vCPUs per VM. One VM program at a time is safest.
+- 64 vCPUs per VM (VZ's maximum, and what the front end reserves). One VM program at a time is safest.
 - Sleep/wake with a running VM is untested — shut VMs down first.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.
-- Verified on this rewrite: **Zen 2** (Matisse) with macOS Sequoia — `hvf-smoke`, `qemu-test.sh`
-  and colima/Docker all pass. The ported core was additionally tested on a Ryzen 7 5800H by the
-  original RyzenHV project. Re-test on yours with `hvf-smoke` and `qemu-test.sh`.
+- Windows under QEMU is blocked at the Tianocore logo; Windows under VirtualBox works. Neither
+  client is officially supported by this project.
+- Verified on this rewrite: **Zen 2** (Matisse, Ryzen 5 3600) with macOS Sequoia — `hvf-smoke`,
+  `amd-info`, VZ/Docker (Kiri, Docker Desktop), VirtualBox and the Android emulator all work. The
+  ported core was additionally tested on a Ryzen 7 5800H by the original RyzenHV project. Re-test
+  on yours with `hvf-smoke` and `./build/hvf-probe`.
 
 ## Sources
 
 ```
 kext/          the kext: SVM, VMCB, VMRUN, nested page tables, the Hypervisor.framework front end
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
-tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test)
-tests/         the 8 unit tests
-scripts/       EFI install, QEMU signing, QEMU boot test, symbol check
+tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
+               hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
+tests/         the 10 unit tests
+scripts/       EFI install, symbol check, legacy QEMU boot test
+docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
+               CAPABILITIES.md (API matrix),
+               DOCKER_DESKTOP.md, KIRI.md, COLIMA.md, VIRTUALBOX.md,
+               ANDROID_STUDIO.md, QEMU.md
 ```
 
 MIT license, see `LICENSE`. Ported from RyzenHV (MIT) — keep that copyright when redistributing.

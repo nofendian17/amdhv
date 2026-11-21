@@ -24,7 +24,7 @@ Kiri calls `VZVirtualMachineConfiguration` and `VZVirtualMachine::startWithCompl
 
 ```bash
 sysctl kern.hv_support       # must print 1 (the kext sets it at boot)
-sudo ~/amdhv/build/amd-info  # SVM must be "active on" every CPU
+sudo build/amd-info  # SVM must be "active on" every CPU
 ```
 
 If `kern.hv_support` is 0, the kext is not loaded or the boot-args are missing — see the [README](../README.md#install) Install section first.
@@ -48,7 +48,7 @@ The Kiri VM powers off automatically after 60 seconds idle (`VM asleep: idle`) a
 ## 4. Verify it runs through AMDHV
 
 ```bash
-sudo ~/amdhv/build/amd-info stats                # vmRuns grows while the Kiri VM runs
+sudo build/amd-info stats  # vmRuns grows while the Kiri VM runs
                                                  # vmFpuMismatches must stay 0
 tail -n 20 ~/.kiri/daemon.log                    # shows "VM booted ms=... cpus=... memory_mib=..."
 docker --context kiri run --rm alpine echo hello # end-to-end test
@@ -70,8 +70,8 @@ Default VM resources on Intel start at 4096 MiB RAM (`4096` in `~/.kiri/vm.json`
 
 | symptom | cause and fix |
 |---|---|
-| `kiri start` hangs or fails immediately | AMDHV not up: verify `sysctl kern.hv_support` returns `1` and `sudo ~/amdhv/build/amd-info` shows SVM active |
-| `the VM did not start within 30 s` in `~/.kiri/daemon.log` | check `sudo ~/amdhv/build/amd-info stats` and `log -f` while triggering `kiri start` to see if `VMRUN` faults (`#VC` / nested page table faults) |
+| `kiri start` hangs or fails immediately | AMDHV not up: verify `sysctl kern.hv_support` returns `1` and `sudo build/amd-info` shows SVM active |
+| `the VM did not start within 30 s` in `~/.kiri/daemon.log` | check `sudo build/amd-info stats` and `log -f` while triggering `kiri start` to see if `VMRUN` faults (`#VC` / nested page table faults) |
 | `codesign` check shows no entitlement | only run official signed/notarized Kiri builds, or sign a custom build with `crates/kiri/kiri.entitlements` |
 | `amd64` image fails on Intel | Kiri x86_64 guest runs `amd64` images natively; verify the Kiri app version matches the CPU (`x86_64` vs `arm64`) |
-| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo ~/amdhv/build/amd-info log` |
+| `kern.hv_support` reads 0 | AMDHV not loaded: check Kernel → Add in `config.plist`, boot-args `amdhv_enable_svm=1 amdhv_hv=1`, and `sudo build/amd-info log` |

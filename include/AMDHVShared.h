@@ -26,8 +26,13 @@ extern "C" {
 #define AMDHV_ABI_VERSION 1
 #define AMDHV_SERVICE_NAME "com_amdhv_AMDHV"
 #define AMDHV_MAX_CPUS 64
-/* Largest number of vCPUs in one VM. */
-#define AMDHV_MAX_VCPUS_PER_VM 16
+/*
+ * Largest number of vCPUs in one VM. 64 is what the front end already reserves in the shared page
+ * (one rw/ro/fp slice per vCPU, see kMaxVcpus in Frontend.cpp) and what
+ * VZVirtualMachineConfiguration.maximumAllowedCPUCount reports on macOS 15, so the core must not be
+ * the lower limit.
+ */
+#define AMDHV_MAX_VCPUS_PER_VM 64
 
 /*
  * IOUserClient selectors. Diagnostics only; add new ones at the end.

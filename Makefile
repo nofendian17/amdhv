@@ -34,13 +34,20 @@ test: | $(BUILD)
 	$(BUILD)/msr_map_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g -o $(BUILD)/slots_test tests/slots_test.cpp
 	$(BUILD)/slots_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/run_deadline_test tests/run_deadline_test.cpp
+	$(BUILD)/run_deadline_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/hv_support_decode_test tests/hv_support_decode_test.cpp
+	$(BUILD)/hv_support_decode_test
 
 tools: | $(BUILD)
 	$(CC) -arch x86_64 -Wall -Wextra -O2 -o $(BUILD)/amd-info tools/amd-info/main.c \
 		-framework IOKit -framework CoreFoundation
 	$(CC) -arch x86_64 -Wall -Wextra -Wno-nullability-completeness -O2 -o $(BUILD)/hvf-smoke tools/hvf-smoke/main.c \
 		-framework Hypervisor
+	$(CC) -arch x86_64 -Wall -Wextra -Wno-nullability-completeness -O2 -o $(BUILD)/hvf-probe tools/hvf-probe/main.c \
+		-framework Hypervisor
 	codesign -s - --force --entitlements tools/hvf-smoke/hypervisor.entitlements $(BUILD)/hvf-smoke
+	codesign -s - --force --entitlements tools/hvf-smoke/hypervisor.entitlements $(BUILD)/hvf-probe
 
 kext:
 	$(MAKE) -C kext

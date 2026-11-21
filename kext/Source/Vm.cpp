@@ -2,6 +2,7 @@
 
 #include "KernelDecls.hpp"
 #include "MsrMap.hpp"
+#include "RunDeadline.hpp"
 #include "X86.hpp"
 #include "Log.hpp"
 #include "SVM.hpp"
@@ -383,14 +384,23 @@ IOReturn com_amdhv_AMDHVVmShared::map(task_t task, uint64_t uva, uint64_t gpa, u
 
 IOReturn com_amdhv_AMDHVVmShared::unmap(uint64_t gpa, uint64_t size)
 {
-    if (size == 0 || ((gpa | size) & 0xFFF) || gpa >= amdhv::npt::kGpaLimit ||
+    if (size == 0 || gpa >= amdhv::npt::kGpaLimit ||
         size > amdhv::npt::kGpaLimit - gpa)
         return kIOReturnBadArgument;
 
+    /*
+     * HVF clients unmap sub-page MMIO ranges: QEMU's TPM TIS uses 0xfed45000, 0x400
+     * bytes. Apple's framework rounds those to whole pages; do the same here instead
+     * of refusing with HV_BAD_ARGUMENT (which aborts the guest's device setup).
+     * Unmapping a page that was never mapped is a no-op in Npt::unmap().
+     */
+    const uint64_t first = gpa & ~(uint64_t)0xFFF;
+    const uint64_t last  = (gpa + size + 0xFFF) & ~(uint64_t)0xFFF;
+
     kickAll();
     IORWLockWrite(fRw);
-    for (uint64_t off = 0; off < size; off += 4096) {
-        void *owner = fNpt.unmap(gpa + off);
+    for (uint64_t page = first; page < last; page += 4096) {
+        void *owner = fNpt.unmap(page);
         if (owner) {
             fPagesMapped--;
             AMDHV_STAT_ADD(vmPagesMapped, -1);
@@ -515,6 +525,7 @@ bool com_amdhv_AMDHVVm::init()
     fRunCpu        = -1;
     fFirstRun    = true;
     fHaveNextRip = false;
+    fExecAbs     = 0;
 
     fLock = IOLockAlloc();
     return fLock != nullptr;
@@ -751,7 +762,7 @@ void com_amdhv_AMDHVVm::kick()
         mp_cpus_call(1ull << cpu, 2 /* NOSYNC */, kickAction, nullptr);
 }
 
-IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
+IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t deadline)
 {
     IOReturn rc = kIOReturnSuccess;
     Vmcb *v = (Vmcb *)fVmcb.va;
@@ -780,7 +791,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
 
     uint64_t sliceAbs = 0;
     nanoseconds_to_absolutetime(kTimesliceNs, &sliceAbs);
-    uint64_t deadline = mach_absolute_time() + sliceAbs;
+    const uint64_t sliceDeadline = amdhv::run::stopTime(mach_absolute_time() + sliceAbs, deadline);
+    /*
+     * A client deadline (hv_vcpu_run_until) can only shorten the slice. When it is what ends the run, the
+     * exit reason is the VMX preemption-timer reason, which is what an Intel client sees when the timer
+     * fires; a slice that ends on its own is still reported as an external interrupt, as before.
+     */
+    const bool deadlineIsStop = deadline != 0 && sliceDeadline == deadline;
     uint64_t code = 0;
     bool timeslice = false;
     uint32_t syntheticReason = 0;       /* VMX exit reason to report instead of an external interrupt (TPR below threshold) */
@@ -830,6 +847,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
                 takePendingEvent();
                 break;
             }
+        }
+        /* A run_until deadline that has already passed: report it, do not enter the guest. */
+        if (deadline != 0 && amdhv::run::expired(mach_absolute_time(), deadline) && !injectionWaiting()) {
+            timeslice = true;
+            syntheticReason = amdhv::vmx::VMX_PREEMPTION_TIMER;
+            takePendingEvent();
+            break;
         }
         /*
          * The page tables must not change while this vCPU is inside the guest: hold them for reading from here until the
@@ -943,7 +967,9 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
             amdhv_wrmsr(amdhv::msr::MSR_TSC_AUX, fVmcs.tscAux());
         }
 
+        const uint64_t execStart = mach_absolute_time();
         amdhv_svm_vmrun(&fGprs, fVmcb.pa, fHostVmcb.pa);
+        fExecAbs += mach_absolute_time() - execStart;
         fRunCpu = -1;
 
         if (fHasTscAux) {
@@ -984,6 +1010,27 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
         v->control.eventInjErr = 0;
 
         /*
+         * MSR_IA32_SPEC_CTRL (0x48) and MSR_IA32_PRED_CMD (0x49) are Intel-only: the AMD CPU has no
+         * such MSR, so a native RDMSR/WRMSR raises #GP in the guest. msrOp() reports the client's
+         * enable_native_msr call as successful but keeps the MSRPM intercept; handle the exit here
+         * as a no-op instead. A Linux guest writes PRED_CMD on each secondary CPU while booting
+         * (write_ibpb) and panics if that write ever reaches the hardware.
+         */
+        if (code == EXIT_MSR && (fGprs.rcx == 0x48 || fGprs.rcx == 0x49)) {
+            static volatile SInt32 logged;
+            if (OSIncrementAtomic(&logged) <= 4)
+                AMDHV_INFO("VmRun: emulated guest access to Intel-only MSR %#llx on AMD",
+                           (unsigned long long)fGprs.rcx);
+            if (!(v->control.exitInfo1 & 1)) {   /* RDMSR: EDX:EAX = 0 */
+                v->save.rax = 0;
+                fGprs.rdx   = 0;
+            }
+            v->save.rip  = v->control.nextRip ? v->control.nextRip : v->save.rip + v->control.insnLen;
+            fHaveNextRip = false;
+            continue;
+        }
+
+        /*
          * The guest executed an SVM instruction (VMRUN, VMLOAD, VMSAVE, STGI, CLGI, SKINIT). A Hypervisor.framework
          * client's guest has no such instructions, so what it would see on Intel with VMX off is #UD: inject that
          * and let the guest handle it.
@@ -1000,8 +1047,10 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
                 v->control.eventInjErr = v->control.exitIntInfoErr;
             }
             /* The host needed the CPU. It has it now; run on unless the slice is over. */
-            if (mach_absolute_time() >= deadline && !injectionWaiting()) {
+            if (amdhv::run::expired(mach_absolute_time(), sliceDeadline) && !injectionWaiting()) {
                 timeslice = true;
+                if (deadlineIsStop)
+                    syntheticReason = amdhv::vmx::VMX_PREEMPTION_TIMER;
                 takePendingEvent();
                 break;
             }
@@ -1047,8 +1096,10 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
                     takePendingEvent();
                     break;
                 }
-                if (mach_absolute_time() >= deadline && !injectionWaiting()) {
+                if (amdhv::run::expired(mach_absolute_time(), sliceDeadline) && !injectionWaiting()) {
                     timeslice = true;
+                    if (deadlineIsStop)
+                        syntheticReason = amdhv::vmx::VMX_PREEMPTION_TIMER;
                     takePendingEvent();
                     break;
                 }
@@ -1103,6 +1154,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out)
     return rc;
 }
 
+uint64_t com_amdhv_AMDHVVm::execTimeNs()
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(fExecAbs, &ns);
+    return ns;
+}
+
 IOReturn com_amdhv_AMDHVVm::msrOp(uint32_t op, uint32_t msrNum, uint64_t value, uint64_t *out)
 {
     using namespace amdhv::msr;
@@ -1137,11 +1195,19 @@ IOReturn com_amdhv_AMDHVVm::msrOp(uint32_t op, uint32_t msrNum, uint64_t value, 
         break;
     }
     case AMDHV_MSR_NATIVE_ENABLE:
-    case AMDHV_MSR_NATIVE_DISABLE:
+    case AMDHV_MSR_NATIVE_DISABLE: {
+        const bool enable = op == AMDHV_MSR_NATIVE_ENABLE;
         /* The guest EFER must keep SVME set, so it can never be written without an exit. */
-        if (mi.kind == K_EFER || !setNative((uint8_t *)fMsrpm.va, msrNum, op == AMDHV_MSR_NATIVE_ENABLE))
+        if (mi.kind == K_EFER)
+            rc = kIOReturnBadArgument;
+        else if (enable && amdhv::msr::intelOnlySpecMsr(msrNum)) {
+            /* Answer success so the client believes the MSR is native, but leave the MSRPM intercept
+             * set: run() emulates the access as a no-op. On AMD these MSRs do not exist, so executing
+             * them natively would #GP inside the guest. */
+        } else if (!setNative((uint8_t *)fMsrpm.va, msrNum, enable))
             rc = kIOReturnBadArgument;
         break;
+    }
     default:
         rc = kIOReturnBadArgument;
     }
@@ -1195,7 +1261,7 @@ IOReturn com_amdhv_AMDHVVm::vmcsReadMany(const AMDHVReadMany *in, AMDHVReadManyO
     return kIOReturnSuccess;
 }
 
-IOReturn com_amdhv_AMDHVVm::runEx(const AMDHVRunIn *in, AMDHVRunOut *out)
+IOReturn com_amdhv_AMDHVVm::runEx(const AMDHVRunIn *in, AMDHVRunOut *out, uint64_t deadline)
 {
     bzero(out, sizeof(*out));
     if (in->nWrites > AMDHV_RUN_MAX_WRITES)
@@ -1215,7 +1281,7 @@ IOReturn com_amdhv_AMDHVVm::runEx(const AMDHVRunIn *in, AMDHVRunOut *out)
         }
     }
     if (!(in->flags & AMDHV_RUN_NO_RUN)) {
-        rc = run((in->flags & AMDHV_RUN_SKIP) != 0, &out->exit);
+        rc = run((in->flags & AMDHV_RUN_SKIP) != 0, &out->exit, deadline);
         if (rc != kIOReturnSuccess)
             return rc;
     }
