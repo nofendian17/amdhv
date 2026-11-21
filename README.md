@@ -27,7 +27,7 @@ make test          # 10 unit tests, runs anywhere
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
-Note: the kext Makefile does not track header changes. After editing a `.hpp`, run `rm -rf build/kext-obj` first.
+The kext Makefile tracks header dependencies: editing a `.hpp`/`.h` rebuilds every object that includes it.
 
 ## Install
 

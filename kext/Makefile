@@ -27,8 +27,11 @@ COMMON  := -arch x86_64 -isysroot $(SDK) -mmacosx-version-min=10.15 \
            -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
            -Wall -Wextra $(OPT)
 
-CXXFLAGS := $(COMMON) -std=gnu++17 -fapple-kext -fno-exceptions -fno-rtti -fno-builtin
-CFLAGS   := $(COMMON) -fno-builtin
+CXXFLAGS := $(COMMON) -std=gnu++17 -fapple-kext -fno-exceptions -fno-rtti -fno-builtin -MMD -MP
+CFLAGS   := $(COMMON) -fno-builtin -MMD -MP
+
+# Header dependencies: editing a .hpp/.h rebuilds every object that includes it.
+DEPS := $(OBJS:.o=.d)
 
 .PHONY: all clean
 
@@ -60,3 +63,5 @@ $(KEXT): $(OBJS) Info.plist
 
 clean:
 	rm -rf $(KEXT) $(OBJDIR)
+
+-include $(DEPS)

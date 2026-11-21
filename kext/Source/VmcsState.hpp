@@ -8,8 +8,9 @@
  *
  * Pure C++ over a caller-owned Vmcb buffer, tested on the host (tests/vmcs_state_test.cpp).
  *
- * Known gaps (documented in docs/PHASE3.md): CR0/CR4 read shadows, NMI-window exiting, MSR/IO bitmaps given
- * by the guest (we intercept all MSRs and, when I/O exiting is on, all ports), VPID, posted interrupts.
+ * Known gaps (documented in docs/CAPABILITIES.md): CR0/CR4 read shadows, MSR/IO bitmaps given by the
+ * guest (we intercept all MSRs and, when I/O exiting is on, all ports), VPID, posted interrupts.
+ * NMI-window exiting is answered by the front end, which reports the window as open at once.
  */
 #ifndef AMDHV_VMCSSTATE_HPP
 #define AMDHV_VMCSSTATE_HPP
@@ -18,6 +19,7 @@
 
 #include "MsrMap.hpp"
 #include "VmxMap.hpp"
+#include "VmcsCaps.hpp"
 
 namespace amdhv {
 namespace vmx {
@@ -127,11 +129,15 @@ static inline uint32_t eventInjFromVmx(uint32_t info, bool *isSoftware)
 
 class VmcsState {
 public:
-    VmcsState() : fVmcb(nullptr) { memset(fShadow, 0, sizeof(fShadow)); memset(fDr, 0, sizeof(fDr)); }
-    explicit VmcsState(amdhv::vmcb::Vmcb *vmcb) : fVmcb(vmcb) { memset(fShadow, 0, sizeof(fShadow)); memset(fDr, 0, sizeof(fDr)); }
+    VmcsState() : fVmcb(nullptr), fTprShadow(true) { memset(fShadow, 0, sizeof(fShadow)); memset(fDr, 0, sizeof(fDr)); }
+    explicit VmcsState(amdhv::vmcb::Vmcb *vmcb) : fVmcb(vmcb), fTprShadow(true) { memset(fShadow, 0, sizeof(fShadow)); memset(fDr, 0, sizeof(fDr)); }
 
     void attach(amdhv::vmcb::Vmcb *vmcb) { fVmcb = vmcb; }
     void reset() { memset(fShadow, 0, sizeof(fShadow)); memset(fDr, 0, sizeof(fDr)); fTscAux = 0; }
+
+    /* Whether the TPR shadow is offered to clients of this VM (Frontend.cpp's gTprShadow). It only affects which
+     * control bits are accepted: the shadow itself keeps working if a client sets it while the switch is off. */
+    void setTprShadow(bool on) { fTprShadow = on; }
 
     /* IA32_TSC_AUX of the guest (RDTSCP): the kext puts it in the real MSR while the guest runs. 32 bits. */
     uint64_t tscAux() const { return fTscAux; }
@@ -189,6 +195,11 @@ public:
             return R_INVALID_FIELD;
         StateMap m = mapField(enc);
         value &= mask(fieldBytes(enc));
+        /* A control field only accepts the bits AMDHV advertises (or the compatibility no-ops). Refusing the write is
+         * better than shadowing a feature the kext cannot honour: the front end logs it, and a client that read the
+         * capability word never sets those bits in the first place. */
+        if (isControlField(enc) && !controlAllowed(enc, value, fTprShadow))
+            return R_INVALID_FIELD;
         switch (m.kind) {
         case KIND_EXT_DR:
             fDr[m.vmcbOff] = value;
@@ -440,6 +451,7 @@ private:
     uint64_t         fShadow[kNumFields];
     uint64_t         fDr[4];
     uint64_t         fTscAux = 0;
+    bool             fTprShadow;
 };
 
 } // namespace vmx

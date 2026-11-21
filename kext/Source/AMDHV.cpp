@@ -9,7 +9,7 @@
 
 #define super IOService
 
-#define AMDHV_VERSION "0.1.1"
+#define AMDHV_VERSION "0.1.2"
 
 OSDefineMetaClassAndStructors(com_amdhv_AMDHV, IOService)
 

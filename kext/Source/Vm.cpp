@@ -1,6 +1,7 @@
 #include <IOKit/IOLib.h>
 
 #include "KernelDecls.hpp"
+#include "Frontend.hpp"
 #include "MsrMap.hpp"
 #include "RunDeadline.hpp"
 #include "X86.hpp"
@@ -528,6 +529,7 @@ bool com_amdhv_AMDHVVm::init()
     fExecAbs     = 0;
 
     fLock = IOLockAlloc();
+    fVmcs.setTprShadow(amdhv::hv::tprShadow());
     return fLock != nullptr;
 }
 
