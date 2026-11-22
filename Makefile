@@ -40,6 +40,8 @@ test: | $(BUILD)
 	$(BUILD)/asid_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/tlb_policy_test tests/tlb_policy_test.cpp
 	$(BUILD)/tlb_policy_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/sleep_policy_test tests/sleep_policy_test.cpp
+	$(BUILD)/sleep_policy_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/clean_bits_test tests/clean_bits_test.cpp
 	$(BUILD)/clean_bits_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/space_pool_test tests/space_pool_test.cpp

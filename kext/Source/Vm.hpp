@@ -183,6 +183,7 @@ private:
     volatile uint32_t         fKick;
     volatile uint32_t         fForceTlbFlush;    /* hv_vcpu_invalidate_tlb asked for a flush */
     uint64_t                  fTlbGenSeen;       /* the tlbGen this vCPU last flushed for */
+    uint64_t                  fSleepEpoch;       /* svm::sleepEpoch() this VMCB was last valid for */
     uint32_t                  fAsid;             /* this vCPU's SVM ASID (0 = none, share the host's) */
     volatile uint32_t         fSpace;            /* hv_vm_space_t this vCPU runs in (0 = default) */
     bool                      fHasFlushByAsid;   /* CPUID Fn8000_000A EDX bit 6: TLB_CONTROL 3 is valid */

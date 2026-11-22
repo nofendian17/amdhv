@@ -264,7 +264,10 @@ HvVm *vmCreate(uint64_t *info)
 
     task_t task = current_task();
     for (int i = 0; i < 3; i++) {
-        vm->md[i] = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared, sizes[i], 4096);
+        vm->md[i] = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+                                                               kIODirectionInOut | kIOMemoryKernelUserShared |
+                                                                   kIOMemoryMapperNone,
+                                                               sizes[i], 4096);
         if (!vm->md[i]) {
             vmFree(vm);
             return nullptr;
@@ -1026,8 +1029,14 @@ kern_return_t tVcpuInterrupt(void *target, uint64_t arg)
  * task; the task's VM is freed with the task. */
 void cbNoopVcpu(void *) {}
 void cbNoopVolatile(void *, int) {}
-void cbNoop(void) {}
 void cbTaskDestroy(void *vm) { vmFree(static_cast<HvVm *>(vm)); }
+
+/* hv_suspend() runs on the boot CPU after the other CPUs are off and the APIC is shut down, so it
+ * cannot rendezvous or touch MSRs. It only closes the door on new guest entries; the PM notification
+ * in AMDHV.cpp clears EFER.SVME/VM_HSAVE_PA while every CPU is still up. hv_resume() runs before the
+ * APs are online, so it only moves the epoch that makes each vCPU reload its VMCB. */
+void cbHvSuspend(void) { amdhv::svm::noteSuspend(); }
+void cbHvResume(void) { amdhv::svm::noteResume(); }
 
 /* IOReturn of the existing VM code -> the codes the framework expects. */
 kern_return_t hvFromIo(IOReturn r)
@@ -1235,11 +1244,11 @@ static bool registerTraps()
     hv_callbacks_t cb = {};
     cb.dispatch = cbNoopVcpu;
     cb.preempt = cbNoopVcpu;
-    cb.suspend = cbNoop;
+    cb.suspend = cbHvSuspend;
     cb.thread_destroy = cbNoopVcpu;
     cb.task_destroy = cbTaskDestroy;
     cb.volatile_state = cbNoopVolatile;
-    cb.resume = cbNoop;
+    cb.resume = cbHvResume;
     if (hv_set_callbacks(cb) != KERN_SUCCESS) {
         AMDHV_WARN("hv front end: hv_set_callbacks refused");
         hv_release_traps(HV_THREAD_TRAP);

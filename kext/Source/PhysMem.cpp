@@ -10,8 +10,11 @@ bool physAlloc(PhysMem *m, size_t size)
     bzero(m, sizeof(*m));
     size = (size + 4095) & ~(size_t)4095;
 
+    /* kIOMemoryMapperNone: these pages are addressed by physical address, never DMA-mapped. Without
+     * it IOBufferMemoryDescriptor calls IOMapper::checkForSystemMapper(), which during early boot
+     * waits for the system mapper and reports "waitForSystemMapper" with the calling kext. */
     IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, size,
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone, size,
         0x000FFFFFFFFFF000ULL);
     if (!md) {
         AMDHV_ERR("physAlloc(%zu): out of contiguous memory", size);

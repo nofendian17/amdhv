@@ -6,6 +6,7 @@
 #include "Asid.hpp"
 #include "MsrMap.hpp"
 #include "RunDeadline.hpp"
+#include "SleepPolicy.hpp"
 #include "TlbPolicy.hpp"
 #include "X86.hpp"
 #include "Log.hpp"
@@ -693,6 +694,7 @@ bool com_amdhv_AMDHVVm::init()
     fTscNative     = false;
     fForceTlbFlush = 0;
     fTlbGenSeen    = 0;           /* 0 != fTlbGen (starts at 1): the first run flushes */
+    fSleepEpoch    = svm::sleepEpoch();
     fHasFlushByAsid = false;      /* create() fills this in from CPUID before setup() */
     fHasVmcbClean   = false;      /* same */
     fHasPauseFilter = false;      /* same */
@@ -1013,6 +1015,19 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
                  (unsigned long long)v->control.nestedCr3);
     }
 
+    /*
+     * Power was removed since this VMCB was last used: the processor's cached copy of every clean
+     * group is gone, and so are its TLB entries. Reload the VMCB in full and flush the ASID. The
+     * epoch is checked on every run() entry; a resume that happens while this call is already in
+     * the loop stops the loop through activeOnAllUsable().
+     */
+    const uint64_t sleepEpoch = svm::sleepEpoch();
+    if (amdhv::svm::needsReload(fSleepEpoch, sleepEpoch)) {
+        fSleepEpoch = sleepEpoch;
+        fVmcs.markAllDirty();
+        __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE);
+    }
+
     fVmcs.applyControls();      /* controls and event injection the client set through the VMCS */
 
     uint64_t sliceAbs = 0;
@@ -1137,6 +1152,12 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             needRescan = true;
             AMDHV_INFO("VmRun: cpu %d was not known to the SVM code, rescanning", runCpu);
             continue;
+        }
+        if (svmFix == -3) {                   /* a suspend started between the check and here */
+            fRunCpu = -1;
+            ml_set_interrupts_enabled(ints);
+            rc = kIOReturnNotReady;
+            break;
         }
         if (svmFix < 0) {
             fRunCpu = -1;

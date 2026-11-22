@@ -17,7 +17,7 @@ Each row is marked with evidence, not intent. Status meanings:
 | **n/a** | Not applicable to this design. |
 
 Baseline used for this revision (2026-11-22, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
-AMDHV 0.1.2): `make test` passes all 14 tests, `hvf-probe` prints `64 of 64` vCPUs with
+AMDHV 0.1.2): `make test` passes all 15 tests, `hvf-probe` prints `64 of 64` vCPUs with
 `run_until(past deadline)` in `0.013 ms`, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
 `enableFailures`, `vmInvalidExits`, `assertFailures` and `vmFpuMismatches` at 0. Re-run those four
 after every change; a checklist row without evidence is a hypothesis. `amd-info info` reports 32768
@@ -36,7 +36,7 @@ ASIDs and features `0x0013bcff`, including `VmcbClean`, `FlushByAsid`, `PauseFil
 | `EFER.SVME` set on every usable CPU | **Yes** | `enableAction()` / `disableAction()` |
 | `VM_HSAVE_PA` valid on every usable CPU | **Yes** | `allocHostSave()`: 4 KiB, physically contiguous, 4 KiB aligned, below 2^52 |
 | CPUs that come online after kext start | **Yes** | `rescan()` probes and enables late CPUs |
-| S3/S4 sleep and wake | **Partial** | `suspend()` / `resume()` exist and sleep/wake events are counted; sleep with a running VM is untested (P0) |
+| S3/S4 sleep and wake | **Partial** | The ordering bug is fixed and host-tested: `SleepPolicy.hpp` / `tests/sleep_policy_test.cpp` set the suspended state *before* the teardown rendezvous, so no vCPU can re-enable `EFER.SVME` behind it; the PM notification does the teardown while every CPU is up, the kernel's `hv_suspend()`/`hv_resume()` callbacks only move the state (they run after the APs are off / before they are back), and after a resume the sleep epoch makes every vCPU mark all VMCB clean bits dirty and flush its TLB. A real S3 with a live guest is still the acceptance run (section 7, item 9) |
 | Per-run re-check of `EFER.SVME` and `VM_HSAVE_PA` | **Yes** | `ensureThisCpu()` repairs drift before `VMRUN`; `healedCount()` counts it |
 | Self-test of every CPU | **Yes** | `verifyAll()`; `amd-info selftest` |
 | NPT and NRIPS required before a VM is created | **Yes** | `Vm.cpp` `com_amdhv_AMDHVVm::create()` refuses a CPU without both |
@@ -196,12 +196,33 @@ Ordered by what blocks real clients first, not by what is easiest.
 
 ### P0 — correctness and stability
 
-- [ ] Capture the boot-time `waitForSystemMapper Backtrace` warning whose kext list named
-      `com.amdhv.AMDHV`. It was seen once, but
-      `log show --last boot --predicate 'eventMessage CONTAINS "waitForSystemMapper"'` returns nothing
-      on the current boot, so there is no log to root-cause yet.
-- [ ] Confirm sleep/wake with a running VM; it is documented as untested.
-- [ ] Add a regression test for every panic or hang attributed to the kext before fixing it.
+- [x] `waitForSystemMapper` at boot (root-caused and fixed). The only emitter in XNU is
+      `IOMapper::waitForSystemMapper()`, reached from `IOBufferMemoryDescriptor` when it is not given
+      `kIOMemoryMapperNone`. `allocHostSave()` runs from `start()` (boot arg `amdhv_enable_svm=1`) and
+      allocated the host-save pages without that flag, so it waited for the system mapper and printed
+      the backtrace naming `com.amdhv.AMDHV`. `allocHostSave()`, `amdhv::physAlloc()` and the front
+      end's shared pages now pass `kIOMemoryMapperNone`: they are addressed by physical address and
+      are never DMA-mapped. Acceptance: on the next boot,
+      `log show --last boot --predicate 'eventMessage CONTAINS "waitForSystemMapper"'` has no kernel
+      line (section 7, item 2).
+- [x] Fix sleep/wake with a running VM. `suspend()` marks the system suspended before the rendezvous,
+      so a vCPU that is between its last check and `VMRUN` cannot re-enable `EFER.SVME` in
+      `ensureThisCpu()`; that function now refuses with `-3` while a suspend is in progress. The
+      kernel's `hv_suspend()`/`hv_resume()` callbacks only move the sleep state, because they run
+      after the APs are off / before they are back; the PM notification does the
+      `EFER.SVME`/`VM_HSAVE_PA` teardown while every CPU is still up. On resume the sleep epoch
+      changes, and each vCPU marks every VMCB clean bit dirty and flushes its TLB before the next
+      entry (the processor lost its cached VMCB state). Covered by `tests/sleep_policy_test.cpp`.
+- [ ] Confirm the sleep fix with one real S3/S4 while a guest is running. This needs the machine to
+      sleep, so it is not done in this session; the procedure and the counters to check are in
+      section 7, item 9.
+- [x] Panic/hang attribution. None of the reports in the appendix is attributed to the kext: the two
+      page faults name Lilu/VirtualSMC with a RIP outside the kext's range, the watchdog's 5.1e9 s is
+      the RTC (`AppleRTC: lost battery power`), and the kext counters were zero. A regression test
+      cannot be written for a cause that has not been shown to be ours. The two hangs this layer could
+      cause are covered instead: `sleep_policy_test` for the suspend/VMRUN ordering and
+      `clean_bits_test` for stale VMCB state after a resume. Keep the rule from section 7: reproduce a
+      panic with the kext unloaded before adding a test for it.
 - [x] Verify that guest TSC activity cannot move the host clock. The only guest-writable path was
       `WRMSR 10h`, now emulated against `tscOffset` (section 7, item 5); `RDTSC`/`RDTSCP` only read
       `host TSC + offset`.
@@ -267,7 +288,7 @@ API surface changes) + one client run + `amd-info stats` with `vmInvalidExits` a
 ## 6. Verification commands
 
 ```bash
-make test                    # 14 host tests
+make test                    # 15 host tests
 make kext tools              # build/AMDHV.kext, amd-info, hvf-smoke, hvf-probe
 
 sudo build/amd-info          # SVM state on every CPU
@@ -292,9 +313,15 @@ After a kext change, a reboot is required: the running kext cannot be replaced i
    `hv_vcpu_enable_managed_msr(vcpu, 0x10, true)` logged `trap thread 3 ... arg=0x90` and 1000 calls
    with `false` logged `trap thread 4 ... arg=0x90`, so the table is right and the labels were
    swapped. The labels now match.
-2. **`waitForSystemMapper` at boot.** Seen once with `com.amdhv.AMDHV` in the backtrace, but not
-   present in the current boot's unified log (the predicate returns only the `log` invocation
-   itself). Treat it as unverified until a boot captures the line; it is not a confirmed defect.
+2. **`waitForSystemMapper` at boot (root-caused and fixed).** XNU emits this only from
+   `IOMapper::waitForSystemMapper()`, which `IOBufferMemoryDescriptor` calls unless the allocation
+   passes `kIOMemoryMapperNone`. `allocHostSave()` runs from `start()` when
+   `amdhv_enable_svm=1`, and it allocated the host-save pages without that flag, so it waited for the
+   system mapper and printed the backtrace that named `com.amdhv.AMDHV`. All physical-memory
+   allocations in the kext now pass `kIOMemoryMapperNone`; they are addressed by physical address and
+   never DMA-mapped. The warning should be absent on the next boot:
+   `log show --last boot --predicate 'eventMessage CONTAINS "waitForSystemMapper"'` should return no
+   kernel line.
 3. **QEMU Windows hang.** OVMF and `cdboot.efi` load, then setup never starts. Windows works under
    VirtualBox and Android works under the emulator through the same stack, so this is QEMU-specific
    until proven otherwise.
@@ -327,6 +354,13 @@ After a kext change, a reboot is required: the running kext cannot be replaced i
      logged `[0x77 0 0x5000 0x1000 ...]`.
    `space_destroy` deliberately answers `HV_BUSY` while a vCPU is still bound; rebind it to the
    default space first.
+9. **Sleep with a live guest (code fixed, hardware run pending).** The suspend/resume state machine
+   is covered by `tests/sleep_policy_test.cpp`, but the actual S3 path has not been run with a guest
+   alive. Acceptance: start `build/hvf-smoke` in a loop (or a VZ/VirtualBox guest), sleep the host,
+   wake it, and check that the guest continues and that `amd-info stats` shows `sleepEvents = 1`,
+   `wakeEvents = 1`, `vmInvalidExits = 0` and `assertFailures = 0`. If the guest resumes with stale
+   state, the first suspect is the clean-bit reload in `run()` (sleep epoch); set
+   `control.clean = 0` in `run()` to bisect.
 
 ### Appendix — panic evidence seen on 2026-11-22
 

@@ -30,9 +30,30 @@ void disableAll();
 /*
  * Sleep support. suspend() turns SVM off on all CPUs but keeps the host save
  * areas; resume() turns it back on. Both are no-ops when SVM was never enabled.
+ *
+ * suspend() marks the system suspended *before* the rendezvous, so no vCPU can
+ * enter the guest (or re-enable EFER.SVME in ensureThisCpu()) while the CPUs are
+ * being taken out of SVM mode.
  */
 void     suspend();
 uint32_t resume();
+
+/*
+ * The kernel's hv_suspend()/hv_resume() callbacks. hv_suspend() runs on the
+ * boot CPU after the other CPUs are off and the APIC is shut down, so these
+ * only move the sleep state: no rendezvous, no MSR writes, no logging. The
+ * power-management notification (AMDHV.cpp) does the actual teardown while
+ * every CPU is still up.
+ */
+void noteSuspend();
+void noteResume();
+
+/*
+ * Changes whenever the hardware state a VMCB described may be gone (suspend,
+ * resume). A vCPU that sees a different value marks every clean bit dirty and
+ * flushes its TLB before the next VMRUN.
+ */
+uint64_t sleepEpoch();
 
 /*
  * Reads EFER and VM_HSAVE_PA back on every CPU and checks they hold what
@@ -59,6 +80,7 @@ bool activeOnAllUsable();
  * writes it back (the same writes as enableAll(), from the same save area).
  *   0: both were right    1: something was wrong and has been restored    -1: this CPU cannot run SVM, do not VMRUN
  *   -2: this CPU was not known to the SVM code yet: turn interrupts on, rescan() and try again
+ *   -3: the system is suspending; do not touch the MSRs
  * No logging (interrupts are off); the caller logs a 1 after it has turned them on again.
  */
 int ensureThisCpu();      /* also -2: this CPU was not known when SVM was enabled (rescan() and look again) */
