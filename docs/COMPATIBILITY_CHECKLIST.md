@@ -303,6 +303,28 @@ sysctl kern.hv_support       # must print 1
 
 After a kext change, a reboot is required: the running kext cannot be replaced in place.
 
+### Post-reboot verification (2026-11-22, boot 21:53)
+
+The kext installed in the EFI partition is the build from this tree: the loaded UUID
+`EEF2CE05-5716-3A2E-B3AE-D0352C507905` matches `build/AMDHV.kext/Contents/MacOS/AMDHV`, and the
+kernel ring reports `built Nov 22 2026 21:33:38`. The version string is still 0.1.2, so use the UUID
+or build time to tell this binary from the previous one.
+
+- `log show --last boot --predicate 'eventMessage CONTAINS "waitForSystemMapper"'` returns no kernel
+  line. The boot-allocation fix is effective.
+- `amd-info info`: 12 logical CPUs, SVM usable and active on all 12, `enableFailures = 0`.
+- `hvf-smoke`: PASS (all stages, including the NPF handler and `hv_vcpu_interrupt`).
+- `hvf-probe`: matches `docs/CAPABILITIES.md`. In particular `hv_vm_space_create`, `map_space`,
+  `protect_space`, `unmap_space`, `set_space`, and `HV_BUSY` on `space_destroy` while bound all
+  succeed/answer as documented; the deliberately unimplemented APIC/PIO/extint calls still answer
+  `HV_UNSUPPORTED`.
+- Counters after both tools: `vmCreates = 67`, `vmRuns = 73`, `vmExits = 596`,
+  `vmInvalidExits = 0`, `vmFpuMismatches = 0`, `assertFailures = 0`.
+- No panic was written after the boot (`/Library/Logs/DiagnosticReports` only has the 17:xx reports
+  that predate this boot).
+- `sleepEvents = 0`, `wakeEvents = 0`: the S3/S4 path is still the one item without a hardware run
+  (section 7, item 9).
+
 ---
 
 ## 7. Open questions and observed issues
