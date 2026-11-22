@@ -36,6 +36,14 @@ test: | $(BUILD)
 	$(BUILD)/slots_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/run_deadline_test tests/run_deadline_test.cpp
 	$(BUILD)/run_deadline_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/asid_test tests/asid_test.cpp
+	$(BUILD)/asid_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/tlb_policy_test tests/tlb_policy_test.cpp
+	$(BUILD)/tlb_policy_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/clean_bits_test tests/clean_bits_test.cpp
+	$(BUILD)/clean_bits_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/space_pool_test tests/space_pool_test.cpp
+	$(BUILD)/space_pool_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/hv_support_decode_test tests/hv_support_decode_test.cpp
 	$(BUILD)/hv_support_decode_test
 

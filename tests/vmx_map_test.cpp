@@ -189,17 +189,20 @@ void testExits()
     CHECK(translateExit(ex(EXIT_IOIO, rep), &v) && (v.qual & 7) == 3 && (v.qual & 8) && (v.qual & 16) && (v.qual & 32));
     CHECK(!translateExit(ex(EXIT_IOIO, 0), &v));          /* no size bit: malformed */
 
-    /* NPF -> EPT violation. info1 bit1 = write, bit4 = fetch. Rights come from the NPT lookup. */
-    CHECK(translateExit(ex(EXIT_NPF, 0x6, 0x102010, 0x1018, 0, 0), &v) && v.reason == VMX_EPT_VIOLATION);
+    /* NPF -> EPT violation. info1 bit1 = write, bit4 = fetch, bit32 = EXITINFO2 holds a GPA. */
+    const uint64_t gpaValid = 1ull << 32;
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x6, 0x102010, 0x1018, 0, 0), &v) && v.reason == VMX_EPT_VIOLATION);
     CHECK((v.qual & 7) == 2 && (v.qual & 0x38) == 0 && v.gpa == 0x102010);      /* write to an unmapped page */
-    CHECK(translateExit(ex(EXIT_NPF, 0x7, 0x101010, 0x1013, 0, 1 | 4 /*R,X*/), &v));
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x7, 0x101010, 0x1013, 0, 1 | 4 /*R,X*/), &v));
     CHECK((v.qual & 7) == 2 && (v.qual & (1 << 3)) && !(v.qual & (1 << 4)) && (v.qual & (1 << 5)));   /* write to a R-X page */
-    CHECK(translateExit(ex(EXIT_NPF, 0x15, 0), &v) && (v.qual & 7) == 4);       /* instruction fetch */
-    CHECK(translateExit(ex(EXIT_NPF, 0x4, 0x100010), &v) && (v.qual & 7) == 1); /* data read */
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x15, 0), &v) && (v.qual & 7) == 4);       /* instruction fetch */
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x4, 0x100010), &v) && (v.qual & 7) == 1); /* data read */
     CHECK(v.instrLen == 0);
     /* QEMU only emulates an EPT violation when bit 7 (linear address valid) and bit 8 (final translation) are set. */
-    CHECK(translateExit(ex(EXIT_NPF, (1ull << 32) | 0x6, 0x102010), &v) && (v.qual & (1 << 7)) && (v.qual & (1 << 8)));
-    CHECK(translateExit(ex(EXIT_NPF, (1ull << 33) | 0x6, 0x102010), &v) && (v.qual & (1 << 7)) && !(v.qual & (1 << 8)));   /* page walk */
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x6, 0x102010), &v) && (v.qual & (1 << 7)) && (v.qual & (1 << 8)));
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | (1ull << 33) | 0x6, 0x102010), &v) && (v.qual & (1 << 7)) && !(v.qual & (1 << 8)));   /* page walk */
+    /* Without bit 32 (no DecodeAssists) EXITINFO2 is not an address: report none and claim no translation. */
+    CHECK(translateExit(ex(EXIT_NPF, 0x6, 0xdead000), &v) && v.gpa == 0 && !(v.qual & (1 << 7)) && !(v.qual & (1 << 8)));
 
     /* Exceptions: #PF has an error code and the faulting address; #BP is a software exception; #UD has no code. */
     CHECK(translateExit(ex(0x40 + 14, 0x2, 0xdead000), &v) && v.reason == VMX_EXC_NMI);

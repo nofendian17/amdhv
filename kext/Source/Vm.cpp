@@ -1,9 +1,12 @@
 #include <IOKit/IOLib.h>
+#include <pexpert/pexpert.h>
 
 #include "KernelDecls.hpp"
 #include "Frontend.hpp"
+#include "Asid.hpp"
 #include "MsrMap.hpp"
 #include "RunDeadline.hpp"
+#include "TlbPolicy.hpp"
 #include "X86.hpp"
 #include "Log.hpp"
 #include "SVM.hpp"
@@ -103,6 +106,50 @@ IOLock *sharedLock()
     }
     return gSharedLock;
 }
+
+/* The ASID pool is host-wide (an ASID belongs to the CPU, not to a VM), so it has one lock. */
+amdhv::asid::Pool gAsidPool;
+IOLock *gAsidLock = nullptr;
+bool    gAsidReady = false;
+
+IOLock *asidLock()
+{
+    if (!gAsidLock) {
+        IOLock *l = IOLockAlloc();
+        if (l && !OSCompareAndSwapPtr(nullptr, l, &gAsidLock))
+            IOLockFree(l);
+    }
+    return gAsidLock;
+}
+
+uint32_t asidAlloc()
+{
+    IOLock *l = asidLock();
+    if (!l)
+        return 0;
+    IOLockLock(l);
+    if (!gAsidReady) {
+        uint32_t r[4];
+        amdhv_cpuid(0x8000000Au, 0, r);    /* EBX = the number of ASIDs, including the host's */
+        gAsidPool.init(r[1]);
+        gAsidReady = true;
+    }
+    const uint32_t id = gAsidPool.alloc();
+    IOLockUnlock(l);
+    return id;
+}
+
+void asidFree(uint32_t id)
+{
+    if (!id)
+        return;
+    IOLock *l = asidLock();
+    if (!l)
+        return;
+    IOLockLock(l);
+    gAsidPool.free(id);
+    IOLockUnlock(l);
+}
 } // namespace
 
 com_amdhv_AMDHVVmShared *com_amdhv_AMDHVVmShared::create(task_t owner, IOReturn *err)
@@ -117,7 +164,12 @@ com_amdhv_AMDHVVmShared *com_amdhv_AMDHVVmShared::create(task_t owner, IOReturn 
         *err = kIOReturnNoMemory;
         return nullptr;
     }
-    if (!sh->init() || !sh->setup(owner)) {
+    if (!sh->init()) {
+        sh->release();
+        *err = kIOReturnNoMemory;
+        return nullptr;
+    }
+    if (!sh->setup(owner)) {
         sh->release();
         *err = kIOReturnNoMemory;
         return nullptr;
@@ -173,6 +225,8 @@ bool com_amdhv_AMDHVVmShared::init()
     fRegLock = nullptr;
     bzero(fVcpus, sizeof(fVcpus));
     fPagesMapped = 0;
+    fTlbGen = 1;                  /* 1, not 0: every vCPU's first run flushes the TLB */
+    fSpaceIds.reset();            /* space 0 (fNpt) is the default; the rest start free */
     fRw = IORWLockAlloc();
     fRegLock = IOLockAlloc();
     return fRw && fRegLock;
@@ -190,6 +244,8 @@ void com_amdhv_AMDHVVmShared::free()
     }
     /* Unpins every buffer that is still mapped, then returns the tables. */
     fNpt.shutdown(&releaseOwner, this);
+    for (unsigned i = 0; i < amdhv::space::kMax; i++)
+        fSpaces[i].shutdown(&releaseOwner, this);
     if (fRw) {
         IORWLockFree(fRw);
         fRw = nullptr;
@@ -281,11 +337,11 @@ static bool mdSegment(void *ctx, uint64_t offset, uint64_t *pa, uint64_t *len)
  * Wires `md` (prepare) and holds a reference on it until the last page is unmapped.
  * Caller holds the lock or is still constructing the VM.
  */
-IOReturn com_amdhv_AMDHVVmShared::mapDescriptorLocked(IOMemoryDescriptor *md, uint64_t gpa,
-                                                        uint64_t size, uint32_t perm)
+IOReturn com_amdhv_AMDHVVmShared::mapDescriptorLocked(amdhv::npt::Table &table, IOMemoryDescriptor *md,
+                                                        uint64_t gpa, uint64_t size, uint32_t perm)
 {
     for (uint64_t off = 0; off < size; off += 4096) {
-        if (fNpt.isMapped(gpa + off)) {
+        if (table.isMapped(gpa + off)) {
             AMDHV_DBG("VM map: guest page 0x%llx is already mapped", (unsigned long long)(gpa + off));
             return kIOReturnBusy;
         }
@@ -321,7 +377,7 @@ IOReturn com_amdhv_AMDHVVmShared::mapDescriptorLocked(IOMemoryDescriptor *md, ui
     b->dir  = dir;
 
     uint64_t done = 0;    /* bytes of the range that are mapped so far */
-    amdhv::npt::Status st = fNpt.mapRange(gpa, size, perm, b, &mdSegment, md, &done);
+    amdhv::npt::Status st = table.mapRange(gpa, size, perm, b, &mdSegment, md, &done);
     if (st != amdhv::npt::OK) {
         AMDHV_ERR("VM map: NPT mapRange failed (status %d) after %llu of %llu bytes at gpa 0x%llx", (int)st,
                 (unsigned long long)done, (unsigned long long)size, (unsigned long long)gpa);
@@ -340,7 +396,7 @@ IOReturn com_amdhv_AMDHVVmShared::mapDescriptorLocked(IOMemoryDescriptor *md, ui
     if (rc != kIOReturnSuccess) {
         /* Take back what was mapped so far. */
         for (uint64_t q = 0; q < done; q += 4096) {
-            void *owner = fNpt.unmap(gpa + q);
+            void *owner = table.unmap(gpa + q);
             if (owner) {
                 fPagesMapped--;
                 AMDHV_STAT_ADD(vmPagesMapped, -1);
@@ -352,8 +408,99 @@ IOReturn com_amdhv_AMDHVVmShared::mapDescriptorLocked(IOMemoryDescriptor *md, ui
     return rc;
 }
 
-IOReturn com_amdhv_AMDHVVmShared::map(task_t task, uint64_t uva, uint64_t gpa, uint64_t size,
-                                        uint32_t flags)
+/* The table of `space`, or nullptr when the space does not exist. Caller holds fRw. */
+amdhv::npt::Table *com_amdhv_AMDHVVmShared::tableFor(uint32_t space)
+{
+    if (!space)
+        return &fNpt;
+    const int slot = fSpaceIds.index(space);
+    return slot < 0 ? nullptr : &fSpaces[slot];
+}
+
+IOReturn com_amdhv_AMDHVVmShared::spaceCreate(uint32_t *id)
+{
+    if (!id)
+        return kIOReturnBadArgument;
+
+    IORWLockWrite(fRw);
+    uint32_t sid = 0;
+    unsigned slot = 0;
+    IOReturn rc = kIOReturnSuccess;
+    if (!fSpaceIds.create(&sid, &slot)) {
+        rc = kIOReturnNoResources;      /* 64 spaces are already alive */
+    } else if (!fSpaces[slot].init(kNptAllocator)) {
+        fSpaceIds.release(sid);
+        rc = kIOReturnNoMemory;
+    } else {
+        fTlbGen++;
+    }
+    IORWLockUnlock(fRw);
+
+    if (rc == kIOReturnSuccess)
+        *id = sid;
+    return rc;
+}
+
+IOReturn com_amdhv_AMDHVVmShared::spaceDestroy(uint32_t id)
+{
+    if (!id)
+        return kIOReturnBadArgument;    /* the default space always exists */
+
+    kickAll();
+    IORWLockWrite(fRw);                 /* no map/unmap/protect or set_space may be in flight */
+    const int slot = fSpaceIds.index(id);
+    IOReturn rc;
+    if (slot < 0) {
+        rc = kIOReturnBadArgument;
+    } else if (spaceInUse(id)) {
+        rc = kIOReturnBusy;             /* a vCPU still runs in it: the client must rebind it first */
+    } else {
+        fSpaces[slot].shutdown(&releaseOwner, this);
+        fSpaceIds.release(id);
+        fTlbGen++;
+        rc = kIOReturnSuccess;
+    }
+    IORWLockUnlock(fRw);
+    return rc;
+}
+
+bool com_amdhv_AMDHVVmShared::spaceRoot(uint32_t space, uint64_t *pa)
+{
+    IORWLockRead(fRw);
+    amdhv::npt::Table *table = tableFor(space);
+    if (table && pa)
+        *pa = table->rootPa();
+    IORWLockUnlock(fRw);
+    return table != nullptr;
+}
+
+uint32_t com_amdhv_AMDHVVmShared::spacePerm(uint32_t space, uint64_t gpa)
+{
+    uint32_t perm = 0;
+    IORWLockRead(fRw);
+    amdhv::npt::Table *table = tableFor(space);
+    if (table)
+        table->lookup(gpa, nullptr, &perm);
+    IORWLockUnlock(fRw);
+    return perm;
+}
+
+bool com_amdhv_AMDHVVmShared::spaceInUse(uint32_t space)
+{
+    bool used = false;
+    IOLockLock(fRegLock);
+    for (unsigned i = 0; i < AMDHV_MAX_VCPUS_PER_VM; i++) {
+        if (fVcpus[i] && fVcpus[i]->spaceId() == space) {
+            used = true;
+            break;
+        }
+    }
+    IOLockUnlock(fRegLock);
+    return used;
+}
+
+IOReturn com_amdhv_AMDHVVmShared::map(task_t task, uint32_t space, uint64_t uva, uint64_t gpa,
+                                      uint64_t size, uint32_t flags)
 {
     uint32_t perm = flags;
     if (!amdhv::npt::normalizePerm(&perm) || size == 0 || size > AMDHV_MAP_MAX_SIZE ||
@@ -367,23 +514,25 @@ IOReturn com_amdhv_AMDHVVmShared::map(task_t task, uint64_t uva, uint64_t gpa, u
 
     kickAll();
     IORWLockWrite(fRw);            /* no vCPU is inside the guest while the tables change */
-    IOReturn rc = mapDescriptorLocked(md, gpa, size, perm);
+    amdhv::npt::Table *table = tableFor(space);
+    IOReturn rc = table ? mapDescriptorLocked(*table, md, gpa, size, perm) : kIOReturnBadArgument;
+    fTlbGen++;                     /* every vCPU flushes on its next entry: no translation may survive */
     IORWLockUnlock(fRw);
 
     md->release();                 /* the backing took its own reference */
     if (rc == kIOReturnSuccess) {
         AMDHV_STAT_INC(vmMaps);
-        AMDHV_DBG("VM map: uva 0x%llx -> gpa 0x%llx, %llu KiB, perm %u", (unsigned long long)uva,
-                (unsigned long long)gpa, (unsigned long long)(size / 1024), perm);
+        AMDHV_DBG("VM map: space %u uva 0x%llx -> gpa 0x%llx, %llu KiB, perm %u", space,
+                (unsigned long long)uva, (unsigned long long)gpa, (unsigned long long)(size / 1024), perm);
     } else {
         AMDHV_STAT_INC(vmMapFailures);
-        AMDHV_WARN("VM map failed (0x%x): uva 0x%llx gpa 0x%llx size 0x%llx", rc,
+        AMDHV_WARN("VM map failed (0x%x): space %u uva 0x%llx gpa 0x%llx size 0x%llx", rc, space,
                  (unsigned long long)uva, (unsigned long long)gpa, (unsigned long long)size);
     }
     return rc;
 }
 
-IOReturn com_amdhv_AMDHVVmShared::unmap(uint64_t gpa, uint64_t size)
+IOReturn com_amdhv_AMDHVVmShared::unmap(uint32_t space, uint64_t gpa, uint64_t size)
 {
     if (size == 0 || gpa >= amdhv::npt::kGpaLimit ||
         size > amdhv::npt::kGpaLimit - gpa)
@@ -400,21 +549,27 @@ IOReturn com_amdhv_AMDHVVmShared::unmap(uint64_t gpa, uint64_t size)
 
     kickAll();
     IORWLockWrite(fRw);
+    amdhv::npt::Table *table = tableFor(space);
+    if (!table) {
+        IORWLockUnlock(fRw);
+        return kIOReturnBadArgument;
+    }
     for (uint64_t page = first; page < last; page += 4096) {
-        void *owner = fNpt.unmap(page);
+        void *owner = table->unmap(page);
         if (owner) {
             fPagesMapped--;
             AMDHV_STAT_ADD(vmPagesMapped, -1);
             dropPage(static_cast<Backing *>(owner));
         }
     }
-    IORWLockUnlock(fRw);   /* the TLB is flushed on every VMRUN, see run() */
+    fTlbGen++;                     /* the unmapped pages must not stay in any vCPU's TLB */
+    IORWLockUnlock(fRw);
 
     AMDHV_STAT_INC(vmUnmaps);
     return kIOReturnSuccess;
 }
 
-IOReturn com_amdhv_AMDHVVmShared::protect(uint64_t gpa, uint64_t size, uint32_t flags)
+IOReturn com_amdhv_AMDHVVmShared::protect(uint32_t space, uint64_t gpa, uint64_t size, uint32_t flags)
 {
     uint32_t perm = flags;
     if (!amdhv::npt::normalizePerm(&perm) || size == 0 || ((gpa | size) & 0xFFF) ||
@@ -423,18 +578,24 @@ IOReturn com_amdhv_AMDHVVmShared::protect(uint64_t gpa, uint64_t size, uint32_t 
 
     kickAll();
     IORWLockWrite(fRw);
+    amdhv::npt::Table *table = tableFor(space);
+    if (!table) {
+        IORWLockUnlock(fRw);
+        return kIOReturnBadArgument;
+    }
     IOReturn rc = kIOReturnSuccess;
     for (uint64_t off = 0; off < size; off += 4096) {
-        if (!fNpt.isMapped(gpa + off)) {
+        if (!table->isMapped(gpa + off)) {
             rc = kIOReturnNotFound;   /* check everything first so a failure changes nothing */
             break;
         }
     }
     if (rc == kIOReturnSuccess) {
         for (uint64_t off = 0; off < size; off += 4096)
-            fNpt.protect(gpa + off, perm);
+            table->protect(gpa + off, perm);
         AMDHV_STAT_INC(vmProtects);
     }
+    fTlbGen++;                     /* permissions changed: a stale TLB entry would keep the old rights */
     IORWLockUnlock(fRw);
     return rc;
 }
@@ -483,6 +644,10 @@ com_amdhv_AMDHVVm *com_amdhv_AMDHVVm::create(const AMDHVInfo &info, task_t owner
         *err = kIOReturnNoMemory;
         return nullptr;
     }
+    vm->fHasFlushByAsid = (info.svmFeatures & AMDHV_SVM_FEAT_FLUSH_BY_ASID) != 0;
+    vm->fHasVmcbClean   = (info.svmFeatures & AMDHV_SVM_FEAT_VMCB_CLEAN) != 0;
+    vm->fHasPauseFilter = (info.svmFeatures & AMDHV_SVM_FEAT_PAUSE_FILTER) != 0;
+    vm->fHasPauseThresh = (info.svmFeatures & AMDHV_SVM_FEAT_PAUSE_THRESH) != 0;
     IOReturn arc = sh->attach(vm, &vm->fIndex);
     if (arc != kIOReturnSuccess) {
         AMDHV_WARN("VmCreate: VM %llu has no room for another vCPU", (unsigned long long)sh->id());
@@ -503,6 +668,8 @@ com_amdhv_AMDHVVm *com_amdhv_AMDHVVm::create(const AMDHVInfo &info, task_t owner
 
 bool com_amdhv_AMDHVVm::init()
 {
+    fAsid = 0;                     /* free() must not return a garbage ASID if super::init() fails */
+    fSpace = 0;                    /* the default address space until hv_vcpu_set_space */
     if (!super::init())
         return false;
 
@@ -523,6 +690,19 @@ bool com_amdhv_AMDHVVm::init()
     fFpuSize       = 0;
     fKick          = 0;
     fHasTscAux     = false;
+    fTscNative     = false;
+    fForceTlbFlush = 0;
+    fTlbGenSeen    = 0;           /* 0 != fTlbGen (starts at 1): the first run flushes */
+    fHasFlushByAsid = false;      /* create() fills this in from CPUID before setup() */
+    fHasVmcbClean   = false;      /* same */
+    fHasPauseFilter = false;      /* same */
+    fHasPauseThresh = false;      /* same */
+    fLastCpu       = -1;          /* no CPU has cached this ASID yet: the first run flushes */
+    {
+        uint32_t asidMode = 1;
+        PE_parse_boot_argn("amdhv_asid", &asidMode, sizeof(asidMode));
+        fAsidMode = asidMode != 0;
+    }
     fRunCpu        = -1;
     fFirstRun    = true;
     fHaveNextRip = false;
@@ -538,6 +718,10 @@ void com_amdhv_AMDHVVm::free()
     if (fShared) {
         if (fIndex != ~0u)
             fShared->detach(this);
+    }
+    if (fAsid) {
+        asidFree(fAsid);
+        fAsid = 0;
     }
     physFree(&fScratchFpu);
     physFree(&fGuestFpu);
@@ -559,6 +743,16 @@ void com_amdhv_AMDHVVm::free()
 
 bool com_amdhv_AMDHVVm::setup()
 {
+    /*
+     * One ASID per vCPU, like KVM: two vCPUs of the same VM can be in different address spaces
+     * (different guest CR3) at the same time, and a shared ASID would let one vCPU's translations be
+     * used by the other on a CPU where both have run. 0 means the pool is empty; the vCPU then shares
+     * the host's ASID and run() flushes the whole TLB on every entry.
+     */
+    fAsid = asidAlloc();
+    if (!fAsid)
+        AMDHV_WARN("VmCreate: no ASID left, vCPU %u shares the host's ASID (flush on every run)", fIndex);
+
     if (!physAlloc(&fVmcb, 4096) || !physAlloc(&fHostVmcb, 4096) || !physAlloc(&fIopm, 12288) ||
         !physAlloc(&fMsrpm, 8192))
         return false;
@@ -586,32 +780,53 @@ bool com_amdhv_AMDHVVm::setup()
     }
 
     fVmcs.attach((amdhv::vmcb::Vmcb *)fVmcb.va);
+    fVmcs.setPauseFilter(fHasPauseFilter, fHasPauseThresh);
 
     /* Intercept every I/O port and every MSR: userland decides what the guest may touch. */
     memset(fIopm.va, 0xFF, fIopm.size);
     memset(fMsrpm.va, 0xFF, fMsrpm.size);
 
     fFirstRun = true;
+    fSpace = 0;
     resetLocked(0, 0);
+    uint64_t rootPa = 0;
+    fShared->spaceRoot(0, &rootPa);
     AMDHV_INFO("vCPU %u of VM %llu created: vmcb pa 0x%llx, npt root pa 0x%llx", fIndex,
              (unsigned long long)fShared->id(), (unsigned long long)fVmcb.pa,
-             (unsigned long long)fShared->npt().rootPa());
+             (unsigned long long)rootPa);
     return true;
 }
 
 IOReturn com_amdhv_AMDHVVm::map(task_t task, uint64_t uva, uint64_t gpa, uint64_t size, uint32_t flags)
 {
-    return fShared->map(task, uva, gpa, size, flags);
+    return fShared->map(task, 0, uva, gpa, size, flags);
 }
 
 IOReturn com_amdhv_AMDHVVm::unmap(uint64_t gpa, uint64_t size)
 {
-    return fShared->unmap(gpa, size);
+    return fShared->unmap(0, gpa, size);
 }
 
 IOReturn com_amdhv_AMDHVVm::protect(uint64_t gpa, uint64_t size, uint32_t flags)
 {
-    return fShared->protect(gpa, size, flags);
+    return fShared->protect(0, gpa, size, flags);
+}
+
+IOReturn com_amdhv_AMDHVVm::setSpace(uint32_t space)
+{
+    IOLockLock(fLock);
+    uint64_t root = 0;
+    IOReturn rc = kIOReturnSuccess;
+    if (!fShared->spaceRoot(space, &root)) {
+        rc = kIOReturnBadArgument;
+    } else if (space != fSpace) {
+        fSpace = space;
+        ((Vmcb *)fVmcb.va)->control.nestedCr3 = root;
+        fVmcs.markDirty(CLEAN_NP);      /* N_CR3 lives in the nested-paging clean group */
+        fForceTlbFlush = 1;             /* translations of the old space must not survive */
+    }
+    IOLockUnlock(fLock);
+    return rc;
 }
 
 /* Real-mode reset state. Caller holds the lock (or is still constructing). */
@@ -622,6 +837,7 @@ void com_amdhv_AMDHVVm::resetLocked(uint16_t cs, uint16_t ip)
     bzero(&fGprs, sizeof(fGprs));
 
     Control &c = v->control;
+    c.clean         = 0;             /* every group is dirty on a fresh VMCB */
     c.interceptDr   = 0xFFFFFFFFu;   /* DR0-3 are not swapped by VMRUN, never let the guest touch them */
     c.interceptVec3 = V3_INTR | V3_NMI | V3_SMI | V3_INIT | V3_CPUID | V3_INVD | V3_HLT | V3_IOIO |
                       V3_MSR | V3_SHUTDOWN;
@@ -629,11 +845,19 @@ void com_amdhv_AMDHVVm::resetLocked(uint16_t cs, uint16_t ip)
                       V4_SKINIT | V4_WBINVD | V4_MONITOR | V4_MWAIT;
     c.iopmBasePa    = fIopm.pa;
     c.msrpmBasePa   = fMsrpm.pa;
-    c.asid          = 1;                       /* 0 is the host */
-    c.tlbCtl        = TLB_FLUSH_ALL;
+    c.asid          = fAsid;                   /* per vCPU; 0 is the host's (and forces a full flush) */
+    c.tlbCtl        = (fAsid && fHasFlushByAsid) ? TLB_FLUSH_BY_ASID : TLB_FLUSH_ALL;
+    fTlbGenSeen     = 0;
+    fForceTlbFlush  = 1;                       /* a reset VMCB must not reuse an old translation */
+    fLastCpu        = -1;
     c.intCtl        = INT_CTL_V_INTR_MASKING;  /* guest EFLAGS.IF does not gate host interrupts */
     c.nestedCtl     = NESTED_CTL_NP_ENABLE;
-    c.nestedCr3     = fShared->npt().rootPa();
+    uint64_t nestedRoot = 0;
+    if (!fShared->spaceRoot(fSpace, &nestedRoot)) {
+        fSpace = 0;
+        fShared->spaceRoot(0, &nestedRoot);
+    }
+    c.nestedCr3     = nestedRoot;
 
     Save &s = v->save;
     setSeg(s.es, 0, 0, 0xFFFF, ATTR_REAL_DATA);
@@ -874,8 +1098,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         }
 
         v->control.exitCode = 0;
-        v->control.tlbCtl   = TLB_FLUSH_ALL;
-        v->control.clean    = 0;      /* every field is dirty, we never use clean bits yet */
+        /* clean bits are maintained by VmcsState: set after a successful VMRUN, cleared on every write */
 
         uint64_t hostCr2;
         __asm__ volatile("movq %%cr2, %0" : "=r"(hostCr2));   /* guest page faults can overwrite it */
@@ -969,6 +1192,31 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             amdhv_wrmsr(amdhv::msr::MSR_TSC_AUX, fVmcs.tscAux());
         }
 
+        /*
+         * TLB control. This vCPU's guest TLB entries are tagged with its own ASID, so they survive
+         * VMRUN and collide with neither the host's (ASID 0) nor another vCPU's. With FlushByAsid the
+         * CPU itself flushes only this ASID on guest CR3 writes and CR4.PGE toggles, so those need no
+         * exit. Flush only when a translation could actually be stale:
+         *   - the nested page tables changed (map/unmap/protect bump the shared fTlbGen),
+         *   - the client asked (hv_vcpu_invalidate_tlb),
+         *   - this vCPU moved to another CPU, whose TLB may still hold entries for this ASID from a
+         *     previous owner (an ASID is reused after free, and a CPU's TLB outlives the vCPU),
+         *   - there is no ASID, or amdhv_asid=0 was given: then flush the whole TLB every entry.
+         * FLUSH_BY_ASID needs CPUID Fn8000_000A EDX bit 6; without it TLB_CONTROL 3 is not valid.
+         * Everything runs with interrupts off here, so runCpu cannot change before VMRUN.
+         */
+        /* Clean bits are per logical CPU: a CPU that has not run this VMCB must reload every group. */
+        if (fHasVmcbClean && fLastCpu != runCpu)
+            fVmcs.markAllDirty();
+        const uint64_t tlbGen = fShared->tlbGen();
+        const bool     forced = __atomic_exchange_n(&fForceTlbFlush, 0, __ATOMIC_ACQ_REL) != 0;
+        const amdhv::vmcb::TlbState tlb = { fAsid != 0, fHasFlushByAsid, fAsidMode, fTlbGenSeen,
+                                            tlbGen, forced, fLastCpu, runCpu };
+        v->control.tlbCtl = amdhv::vmcb::tlbControl(tlb);
+        if (v->control.tlbCtl != TLB_DO_NOTHING)
+            fTlbGenSeen = tlbGen;
+        fLastCpu = runCpu;
+
         const uint64_t execStart = mach_absolute_time();
         amdhv_svm_vmrun(&fGprs, fVmcb.pa, fHostVmcb.pa);
         fExecAbs += mach_absolute_time() - execStart;
@@ -1006,6 +1254,17 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         }
 
         code = v->control.exitCode;
+        /*
+         * A successful VMRUN leaves the VMCB in sync with the state the CPU now holds, so every group
+         * software did not change (and the processor does not write behind our back) is clean for the
+         * next entry. VMEXIT_INVALID means the VMCB was rejected and nothing was loaded.
+         */
+        if (fHasVmcbClean) {
+            if (code == EXIT_INVALID)
+                fVmcs.markAllDirty();
+            else
+                fVmcs.markAllClean();
+        }
         AMDHV_STAT_INC(vmExits);
         /* The injection was either delivered or is reported in exitIntInfo; do not let it fire a second time. */
         v->control.eventInj    = 0;
@@ -1026,6 +1285,31 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             if (!(v->control.exitInfo1 & 1)) {   /* RDMSR: EDX:EAX = 0 */
                 v->save.rax = 0;
                 fGprs.rdx   = 0;
+            }
+            v->save.rip  = v->control.nextRip ? v->control.nextRip : v->save.rip + v->control.insnLen;
+            fHaveNextRip = false;
+            continue;
+        }
+
+        /*
+         * MSR_IA32_TSC (0x10): the client can ask for native access (the framework's slot 144 does), but
+         * SVM applies TSC_OFFSET to reads only. A native WRMSR would write the *host* TSC, so msrOp()
+         * keeps the intercept and the access is emulated here, exactly as msrOp() would: a read adds the
+         * offset, a write moves it. The client never sees an exit it did not ask for.
+         */
+        if (code == EXIT_MSR && fGprs.rcx == 0x10 && fTscNative) {
+            uint32_t lo, hi;
+            __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+            const uint64_t hostTsc = ((uint64_t)hi << 32) | lo;
+            if (v->control.exitInfo1 & 1) {          /* WRMSR: EDX:EAX = the TSC the guest wants */
+                const uint64_t value = ((uint64_t)fGprs.rdx << 32) | (uint32_t)v->save.rax;
+                v->control.tscOffset = value - hostTsc;
+                fVmcs.markDirty(CLEAN_INTERCEPTS);   /* the TSC offset is in the intercepts group */
+                fVmcs.markDirty(amdhv::vmcb::CLEAN_INTERCEPTS);   /* TSC offset is in the intercepts group */
+            } else {                                  /* RDMSR: EDX:EAX = guest TSC */
+                const uint64_t guestTsc = hostTsc + v->control.tscOffset;
+                v->save.rax = (uint32_t)guestTsc;
+                fGprs.rdx   = (uint32_t)(guestTsc >> 32);
             }
             v->save.rip  = v->control.nextRip ? v->control.nextRip : v->save.rip + v->control.insnLen;
             fHaveNextRip = false;
@@ -1128,11 +1412,8 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             fHaveNextRip  = v->control.nextRip != 0;
             vmxTranslated = true;
             uint32_t perm = 0;
-            if (code == EXIT_NPF) {
-                IORWLockRead(fShared->rw());
-                fShared->npt().lookup(v->control.exitInfo2 & ~(uint64_t)0xFFF, nullptr, &perm);
-                IORWLockUnlock(fShared->rw());
-            }
+            if (code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1))
+                perm = fShared->spacePerm(fSpace, v->control.exitInfo2 & ~(uint64_t)0xFFF);
             if (!fVmcs.recordExit(perm)) {
                 vmxTranslated = false;
                 out->reason = AMDHV_EXIT_UNHANDLED;
@@ -1194,18 +1475,22 @@ IOReturn com_amdhv_AMDHVVm::msrOp(uint32_t op, uint32_t msrNum, uint64_t value, 
         }
         if (fVmcs.writeMsr(msrNum, tsc, value) != amdhv::vmx::R_OK)
             rc = kIOReturnBadArgument;
+        else if (mi.kind == K_EFER)
+            __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE);   /* paging mode changed */
         break;
     }
     case AMDHV_MSR_NATIVE_ENABLE:
     case AMDHV_MSR_NATIVE_DISABLE: {
         const bool enable = op == AMDHV_MSR_NATIVE_ENABLE;
+        if (mi.kind == K_TSC)
+            fTscNative = enable;   /* run() must emulate RDMSR/WRMSR 10h while the client thinks it is native */
         /* The guest EFER must keep SVME set, so it can never be written without an exit. */
         if (mi.kind == K_EFER)
             rc = kIOReturnBadArgument;
-        else if (enable && amdhv::msr::intelOnlySpecMsr(msrNum)) {
+        else if (enable && amdhv::msr::mustIntercept(msrNum)) {
             /* Answer success so the client believes the MSR is native, but leave the MSRPM intercept
-             * set: run() emulates the access as a no-op. On AMD these MSRs do not exist, so executing
-             * them natively would #GP inside the guest. */
+             * set: run() emulates the access. TSC is the one that would corrupt the host: SVM applies
+             * TSC_OFFSET to reads only, so a native WRMSR 10h writes the physical TSC. */
         } else if (!setNative((uint8_t *)fMsrpm.va, msrNum, enable))
             rc = kIOReturnBadArgument;
         break;
@@ -1307,6 +1592,15 @@ IOReturn com_amdhv_AMDHVVm::vmcsWrite(uint32_t field, uint64_t value)
     amdhv::vmx::Result r = fVmcs.write(field, value);
     if (r == amdhv::vmx::R_OK && field == amdhv::vmx::F_GUEST_RIP)
         fHaveNextRip = false;           /* the client moved RIP itself */
+    /*
+     * Paging state written through the API: the TLB may still hold translations for the old CR3/paging
+     * mode, and VMRUN does not flush (that is what ASIDs are for). The client normally calls
+     * hv_vcpu_invalidate_tlb for this; do it here as well so a client that forgets cannot run on stale
+     * translations. It costs one flush on the next entry, and these writes are rare.
+     */
+    if (r == amdhv::vmx::R_OK && (field == amdhv::vmx::F_GUEST_CR3 || field == amdhv::vmx::F_GUEST_CR0 ||
+                                  field == amdhv::vmx::F_GUEST_CR4 || field == amdhv::vmx::F_GUEST_EFER))
+        __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE);
     IOLockUnlock(fLock);
     switch (r) {
     case amdhv::vmx::R_OK:         return kIOReturnSuccess;

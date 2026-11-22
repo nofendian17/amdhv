@@ -11,7 +11,7 @@
  * A vCPU's own state is serialised by its lock: run() holds it while the guest runs, which is bounded by the time slice
  * (see Vm.cpp). The page tables have a reader/writer lock: a vCPU holds it for reading while it is inside the guest, and
  * map/unmap/protect take it for writing after kicking every vCPU out, so when they return no vCPU still runs with
- * the old mappings or permissions (every VMRUN flushes the TLB).
+ * the old mappings or permissions (each vCPU flushes its own ASID on its next entry; see run()).
  */
 #ifndef AMDHV_VM_HPP
 #define AMDHV_VM_HPP
@@ -23,6 +23,7 @@
 #include "../../include/AMDHVShared.h"
 #include "FpuState.hpp"
 #include "Npt.hpp"
+#include "SpacePool.hpp"
 #include "VmcsState.hpp"
 #include "PhysMem.hpp"
 #include "VMCB.hpp"
@@ -53,13 +54,23 @@ public:
     void free() override;
 
     uint64_t            id() const { return fId; }
-    amdhv::npt::Table    &npt() { return fNpt; }
     IORWLock           *rw() const { return fRw; }
+    uint64_t             tlbGen() const { return fTlbGen; }
 
-    /* hv_vm_map / unmap / protect. See AMDHVShared.h for the exact rules. */
-    IOReturn map(task_t task, uint64_t uva, uint64_t gpa, uint64_t size, uint32_t flags);
-    IOReturn unmap(uint64_t gpa, uint64_t size);
-    IOReturn protect(uint64_t gpa, uint64_t size, uint32_t flags);
+    /* hv_vm_map / unmap / protect, in `space` (0 is the default address space). See AMDHVShared.h. */
+    IOReturn map(task_t task, uint32_t space, uint64_t uva, uint64_t gpa, uint64_t size, uint32_t flags);
+    IOReturn unmap(uint32_t space, uint64_t gpa, uint64_t size);
+    IOReturn protect(uint32_t space, uint64_t gpa, uint64_t size, uint32_t flags);
+
+    /* hv_vm_space_create / destroy. Extra address spaces are nested page table roots of their own. */
+    IOReturn spaceCreate(uint32_t *id);
+    IOReturn spaceDestroy(uint32_t id);
+    /* Root of `space` (0 is the default table), for hv_vcpu_set_space. False when it does not exist. */
+    bool     spaceRoot(uint32_t space, uint64_t *pa);
+    /* NPT rights of `gpa` in `space` (npt::PERM_*), 0 when unmapped or the space does not exist. */
+    uint32_t spacePerm(uint32_t space, uint64_t gpa);
+    /* True when a vCPU is currently bound to `space`. */
+    bool     spaceInUse(uint32_t space);
 
     /* The vCPUs, for kicking them out of the guest. attach() fails with kIOReturnNoResources when the VM is full. */
     IOReturn attach(com_amdhv_AMDHVVm *vcpu, uint32_t *index);
@@ -75,9 +86,11 @@ public:
 
 private:
     bool     setup(task_t owner);
-    IOReturn mapDescriptorLocked(IOMemoryDescriptor *md, uint64_t gpa, uint64_t size, uint32_t perm);
+    IOReturn mapDescriptorLocked(amdhv::npt::Table &table, IOMemoryDescriptor *md, uint64_t gpa,
+                                 uint64_t size, uint32_t perm);
     static void dropPage(Backing *b);
     static void releaseOwner(void *ctx, void *owner);
+    amdhv::npt::Table *tableFor(uint32_t space);      /* caller holds fRw */
 
     uint64_t                  fId;
     task_t                    fOwner;
@@ -85,7 +98,10 @@ private:
     IOLock                   *fRegLock;
     com_amdhv_AMDHVVm *fVcpus[AMDHV_MAX_VCPUS_PER_VM];
     amdhv::npt::Table           fNpt;
+    amdhv::npt::Table           fSpaces[amdhv::space::kMax];
+    amdhv::space::Pool          fSpaceIds;
     uint64_t                  fPagesMapped;
+    volatile uint64_t         fTlbGen;    /* bumped whenever the nested page tables change */
 };
 
 class com_amdhv_AMDHVVm : public OSObject {
@@ -111,6 +127,10 @@ public:
     IOReturn unmap(uint64_t gpa, uint64_t size);
     IOReturn protect(uint64_t gpa, uint64_t size, uint32_t flags);
 
+    /* hv_vcpu_set_space: bind this vCPU to another guest address space (0 = the default one). */
+    IOReturn setSpace(uint32_t space);
+    uint32_t spaceId() const { return fSpace; }
+
     IOReturn getRegs(AMDHVRegs *out);
     IOReturn setRegs(const AMDHVRegs *in);
     IOReturn run(bool skipInstruction, AMDHVExit *out, uint64_t deadline = 0);
@@ -129,6 +149,8 @@ public:
      * take its next interrupt (up to 10 ms later, too slow for a guest that expects a 250-1000 Hz timer).
      */
     void     kick();
+    /* hv_vcpu_invalidate_tlb: flush this vCPU's guest TLB on its next entry. */
+    void     forceTlbFlush() { __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE); }
 
     IOReturn getFpu(AMDHVFpuState *out);
     IOReturn setFpu(const AMDHVFpuState *in);
@@ -156,8 +178,19 @@ private:
     uint64_t                  fGuestXcr0;
     uint64_t                  fXcr0Supported;    /* CPUID.0xD.0 EDX:EAX */
     bool                      fHasTscAux;        /* the CPU has RDTSCP, so IA32_TSC_AUX */
+    bool                      fTscNative;        /* the client asked for native MSR 0x10: run() emulates it in-kernel */
     uint32_t                  fFpuSize;
     volatile uint32_t         fKick;
+    volatile uint32_t         fForceTlbFlush;    /* hv_vcpu_invalidate_tlb asked for a flush */
+    uint64_t                  fTlbGenSeen;       /* the tlbGen this vCPU last flushed for */
+    uint32_t                  fAsid;             /* this vCPU's SVM ASID (0 = none, share the host's) */
+    volatile uint32_t         fSpace;            /* hv_vm_space_t this vCPU runs in (0 = default) */
+    bool                      fHasFlushByAsid;   /* CPUID Fn8000_000A EDX bit 6: TLB_CONTROL 3 is valid */
+    bool                      fHasVmcbClean;     /* CPUID Fn8000_000A EDX bit 5: VMCB clean bits are valid */
+    bool                      fHasPauseFilter;   /* CPUID Fn8000_000A EDX bit 10: pause filter count */
+    bool                      fHasPauseThresh;   /* CPUID Fn8000_000A EDX bit 12: advanced pause filter */
+    bool                      fAsidMode;         /* amdhv_asid=0: flush on every entry, as before */
+    int                       fLastCpu;          /* CPU this vCPU last entered the guest on, -1 = none */
     volatile int              fRunCpu;           /* CPU inside VMRUN, -1 when none; for kick() */
     amdhv::GuestGprs            fGprs;
     bool                      fFirstRun;

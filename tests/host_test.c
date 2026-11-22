@@ -128,6 +128,7 @@ int main(void)
     CHECK(amdhv_npf_present(0x3) && amdhv_npf_is_write(0x3) && !amdhv_npf_is_fetch(0x3));
     CHECK(!amdhv_npf_present(0x14) && amdhv_npf_is_fetch(0x14) && !amdhv_npf_is_write(0x14));
     CHECK(amdhv_npf_in_walk(1ull << 33) && !amdhv_npf_in_walk(1ull << 32));
+    CHECK(amdhv_npf_gpa_valid(1ull << 32) && !amdhv_npf_gpa_valid(0x6));
 
     /* IOIO decoding: OUT DX,AL to port 0x3F8 as reported by SVM. */
     {

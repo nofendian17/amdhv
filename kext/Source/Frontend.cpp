@@ -69,7 +69,7 @@ const char *const kTaskNames[kTraps] = {
     "vm_create", "vm_destroy", "space_create", "space_destroy", "vm_map", "vm_unmap", "vm_protect", "vm_sync_tsc",
     "add_pio_notifier", "rem_pio_notifier", "intctl(atpic/ioapic/lapic)", "lapic_msi", "vcpu_create", "vcpu_interrupt", "?14", "?15"};
 const char *const kThreadNames[kTraps] = {
-    "vcpu_run", "vcpu_run_until", "invalidate_tlb", "disable_managed_msr", "enable_managed_msr", "vcpu_attach/destroy",
+    "vcpu_run", "vcpu_run_until", "invalidate_tlb", "enable_managed_msr", "disable_managed_msr", "vcpu_attach/destroy",
     "set_space", "read_vmcs(slot)", "?8", "set_apic_address", "set_msr_access", "sync_special_regs", "get_cap_write_vmcs",
     "apic(sub-op)", "?14", "?15"};
 
@@ -582,7 +582,12 @@ kern_return_t tCapWrite(void *target, uint64_t slot)
 kern_return_t tInvalidateTlb(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 2, arg);
-    return target ? kHvOk : kHvNoDev;
+    HvVcpu *v = static_cast<HvVcpu *>(target);
+    if (!v || !v->cpu)
+        return kHvNoDev;
+    /* The guest TLB is no longer flushed on every entry, so this call must actually schedule one. */
+    v->cpu->forceTlbFlush();
+    return kHvOk;
 }
 
 /* Managed MSRs (thread traps 3 enable, 4 disable, 10 set access): the guest uses the MSR natively; the client reads its value from the
@@ -1048,7 +1053,8 @@ kern_return_t hvFromIo(IOReturn r)
     }
 }
 
-/* hv_vm_map_item_t: { space, uva, gpa, size, flags }, 40 bytes. Only the default address space (0) exists. */
+/* hv_vm_map_item_t: { space, uva, gpa, size, flags }, 40 bytes. Space 0 is the default address space; the
+ * space API creates more (see tVmSpaceCreate). */
 struct MapItem { uint64_t space, uva, gpa, size, flags; };
 
 kern_return_t mapItem(HvVm *vm, uint64_t arg, MapItem *it)
@@ -1057,9 +1063,38 @@ kern_return_t mapItem(HvVm *vm, uint64_t arg, MapItem *it)
         return kHvNoDev;
     if (copyin((user_addr_t)arg, it, sizeof(*it)))
         return kHvError;
-    if (it->space != 0 || (it->flags >> 32))
+    if (it->space > 0xFFFFFFFFull || (it->flags >> 32))
         return kHvBadArg;
     return kHvOk;
+}
+
+/* hv_vm_space_create: `arg` points at the hv_vm_space_t the framework hands back. */
+kern_return_t tVmSpaceCreate(void *target, uint64_t arg)
+{
+    note(HV_TASK_TRAP, 2, arg);
+    HvVm *vm = static_cast<HvVm *>(target);
+    if (!vmPin(vm))
+        return kHvNoDev;
+    uint32_t id = 0;
+    kern_return_t k = hvFromIo(vm->shared->spaceCreate(&id));
+    if (k == kHvOk && copyout(&id, (user_addr_t)arg, sizeof(id))) {
+        vm->shared->spaceDestroy(id);           /* do not leak a space the client cannot name */
+        k = kHvError;
+    }
+    vmUnpin(vm);
+    return k;
+}
+
+/* hv_vm_space_destroy: `arg` is the space ID itself. */
+kern_return_t tVmSpaceDestroy(void *target, uint64_t arg)
+{
+    note(HV_TASK_TRAP, 3, arg);
+    HvVm *vm = static_cast<HvVm *>(target);
+    if (!vmPin(vm))
+        return kHvNoDev;
+    kern_return_t k = arg > 0xFFFFFFFFull ? kHvBadArg : hvFromIo(vm->shared->spaceDestroy((uint32_t)arg));
+    vmUnpin(vm);
+    return k;
 }
 
 kern_return_t tVmMap(void *target, uint64_t arg)
@@ -1074,7 +1109,8 @@ kern_return_t tVmMap(void *target, uint64_t arg)
         vmUnpin(vm);
         return k;
     }
-    kern_return_t rc = hvFromIo(vm->shared->map(current_task(), it.uva, it.gpa, it.size, (uint32_t)it.flags));
+    kern_return_t rc = hvFromIo(vm->shared->map(current_task(), (uint32_t)it.space, it.uva, it.gpa, it.size,
+                                                (uint32_t)it.flags));
     vmUnpin(vm);
     return rc;
 }
@@ -1091,7 +1127,7 @@ kern_return_t tVmUnmap(void *target, uint64_t arg)
         vmUnpin(vm);
         return k;
     }
-    kern_return_t rc = hvFromIo(vm->shared->unmap(it.gpa, it.size));
+    kern_return_t rc = hvFromIo(vm->shared->unmap((uint32_t)it.space, it.gpa, it.size));
     vmUnpin(vm);
     return rc;
 }
@@ -1108,9 +1144,21 @@ kern_return_t tVmProtect(void *target, uint64_t arg)
         vmUnpin(vm);
         return k;
     }
-    kern_return_t rc = hvFromIo(vm->shared->protect(it.gpa, it.size, (uint32_t)it.flags));
+    kern_return_t rc = hvFromIo(vm->shared->protect((uint32_t)it.space, it.gpa, it.size, (uint32_t)it.flags));
     vmUnpin(vm);
     return rc;
+}
+
+/* hv_vcpu_set_space: `arg` is the space ID (the vCPU is this thread's target). */
+kern_return_t tSetSpace(void *target, uint64_t arg)
+{
+    note(HV_THREAD_TRAP, 6, arg);
+    HvVcpu *v = static_cast<HvVcpu *>(target);
+    if (!v || !v->cpu)
+        return kHvNoDev;
+    if (arg > 0xFFFFFFFFull)
+        return kHvBadArg;
+    return hvFromIo(v->cpu->setSpace((uint32_t)arg));
 }
 
 /* hv_vmx_vcpu_set_apic_address: the client tells where its virtual-APIC page is when it uses the TPR shadow. The core keeps the TPR in V_TPR and
@@ -1132,12 +1180,17 @@ kern_return_t stub(void *target, uint64_t arg)
 }
 
 #define S(T, I) stub<T, I>
-/* Task traps: 0 vm_create, 1 vm_destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc, 12 vcpu_create, 13 vcpu_interrupt are real; the rest is logged and answered per mode. */
-const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, S(0, 2), S(0, 3), tVmMap, tVmUnmap, tVmProtect, tVmSyncTsc, S(0, 8), S(0, 9),
-                                      S(0, 10), S(0, 11), tVcpuCreate, tVcpuInterrupt, S(0, 14), S(0, 15)};
-/* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 10 set_msr_access, 5 vcpu_destroy, 7 read slot, 11 sync special regs, 12 capability of a writable slot are real. */
-const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy, S(1, 6), tReadSlot, S(1, 8),
-                                        tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite, S(1, 13), S(1, 14), S(1, 15)};
+/* Task traps: 0 vm_create, 1 vm_destroy, 2/3 space_create/destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc,
+ * 12 vcpu_create, 13 vcpu_interrupt are real; the rest is logged and answered per mode. */
+const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, tVmSpaceCreate, tVmSpaceDestroy, tVmMap, tVmUnmap, tVmProtect,
+                                      tVmSyncTsc, S(0, 8), S(0, 9), S(0, 10), S(0, 11), tVcpuCreate, tVcpuInterrupt, S(0, 14),
+                                      S(0, 15)};
+/* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 5
+ * vcpu_destroy, 6 set address space, 7 read slot, 10 set_msr_access, 11 sync special regs, 12 capability of a writable
+ * slot are real. */
+const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy,
+                                        tSetSpace, tReadSlot, S(1, 8), tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite,
+                                        S(1, 13), S(1, 14), S(1, 15)};
 #undef S
 
 } // namespace
