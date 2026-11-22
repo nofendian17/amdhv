@@ -311,6 +311,7 @@ or build time to tell this binary from the previous one.
 - `log show --last boot --predicate 'eventMessage CONTAINS "waitForSystemMapper"'` returns no kernel
   line. The boot-allocation fix is effective.
 - `amd-info info`: 12 logical CPUs, SVM usable and active on all 12, `enableFailures = 0`.
+- `amd-info selftest` (root): `12 of 12 CPUs ok`, so `EFER.SVME` and `VM_HSAVE_PA` hold on every CPU.
 - `hvf-smoke`: PASS (all stages, including the NPF handler and `hv_vcpu_interrupt`).
 - `hvf-probe`: matches `docs/CAPABILITIES.md`. In particular `hv_vm_space_create`, `map_space`,
   `protect_space`, `unmap_space`, `set_space`, and `HV_BUSY` on `space_destroy` while bound all
