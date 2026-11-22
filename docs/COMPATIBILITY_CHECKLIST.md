@@ -237,10 +237,15 @@ Ordered by what blocks real clients first, not by what is easiest.
       may still hold entries for a reused ASID) and when the client changes paging state through the
       API.
 - [ ] Offer 2 MiB NPT leaves for large guest ranges; keep 4 KiB for sub-page protection.
-      Deferred: the win only materialises when 512 consecutive guest pages are also 512 consecutive
-      host pages. The kext pins user memory one page at a time, and a large leaf would have to be
-      split again whenever a client unmaps or reprotects a subrange. Correctness does not depend on
-      it, so 4 KiB leaves stay until there is a client that maps large contiguous ranges.
+      Deferred: a 2 MiB leaf needs a 2 MiB-aligned guest range whose 512 host pages are also
+      physically contiguous and 2 MiB-aligned. `mapRange()` already walks the descriptor's physical
+      segments (`mdSegment()` calls `getPhysicalSegment`), but for anonymous user memory those
+      segments are usually a single 4 KiB page, so the window almost never exists. The table has no
+      large-leaf support today either: `encodeLeaf()` never sets PS, `walk()`/`lookup()` assume a
+      level-1 leaf, `unmap()`/`protect()` would have to split a large leaf into 512 leaves, and
+      `clear()` releases one owner per 4 KiB page. Correctness does not depend on it, so 4 KiB
+      leaves stay until a client maps a physically contiguous range (or a diagnostic shows a useful
+      share of 2 MiB-aligned contiguous windows).
 - [x] Use the DecodeAssists fields where the CPU reports them. The kext never decodes guest
       instructions itself, so the assists matter at two exits: a CR/DR exit's `EXITINFO1` bit 63
       names the GPR, and an NPF exit's bit 32 says `EXITINFO2` holds the guest physical address.
