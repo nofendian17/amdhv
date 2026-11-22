@@ -329,6 +329,24 @@ or build time to tell this binary from the previous one.
 - `sleepEvents = 0`, `wakeEvents = 0`: the S3/S4 path is still the one item without a hardware run
   (section 7, item 9).
 
+### Live Virtualization.framework run (2026-11-22 22:40, same boot)
+
+An unmodified client (`com.apple.Virtualization.VirtualMachine`, pid 3875) ran a 6-vCPU guest with
+4 GiB of guest RAM for 32 minutes while the counters below were read. Guest RAM accounts for
+`vmPagesMapped = 1048576` (4 GiB in 4 KiB leaves). The ring shows `vcpu0`…`vcpu5` entering through
+`vcpu_run_until`, and the dominant exit is 48 (VMX EPT-violation, i.e. the AMD NPF path), which is
+how the client emulates MMIO.
+
+- `vmCreates = 73`, `vmRuns = 35985555`, `vmExits = 36748682`.
+- `vmInvalidExits = 0`, `vmFpuMismatches = 0`, `assertFailures = 0`, `enableFailures = 0`.
+- `vmNptFaults = 30573198`: the NPF report path is the hottest path in this run and never produced
+  an invalid exit.
+- No panic report was written during or after the run.
+
+The three panic reports from earlier the same day (04:39, 17:17, 17:25) predate this build. Their
+backtraces implicate `as.vit9696.VirtualSMC` / `as.vit9696.Lilu` (two page faults at CR2
+`0xfed80310`) and `com.apple.driver.watchdog` (watchdog timeout), with no AMDHV frame.
+
 ---
 
 ## 7. Open questions and observed issues
