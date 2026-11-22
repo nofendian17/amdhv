@@ -329,25 +329,30 @@ static inline bool translateExit(const SvmExit &in, VmxExit *out)
 
     case EXIT_NPF: {
         /*
-         * SVM EXITINFO1 is a page-fault style error code (bit 0 P, 1 W, 4 ID); EXITINFO2 the guest physical address.
+         * SVM EXITINFO1 is a page-fault style error code (bit 0 P, 1 W, 4 ID); EXITINFO2 is the guest physical
+         * address only when bit 32 is set (DecodeAssists). Without that bit the address is not known, so the
+         * GPA is reported as 0 and the VMX "linear address valid"/"translated" bits stay clear; QEMU's HVF
+         * backend then declines to emulate the access instead of using a bogus address.
          * VMX EPT-violation qualification: 0 data read, 1 data write, 2 instruction fetch, 3/4/5 the page was
          * readable/writable/executable. The page rights come from our NPT, which the caller looks up.
          */
         bool write = (in.info1 & (1u << 1)) != 0;
         bool fetch = (in.info1 & (1u << 4)) != 0;
+        const bool gpaValid = (in.info1 & (1ull << 32)) != 0;
         out->reason = VMX_EPT_VIOLATION;
         /*
          * Bit 7 (guest linear address valid) is set for every access a guest instruction makes; bit 8 says the fault
-         * is on the final translation rather than on a page table the CPU was walking. SVM reports that in
-         * EXITINFO1 bit 32 (final address) and 33 (page table walk). QEMU's HVF backend only emulates an access
+         * is on the final translation rather than on a page table the CPU was walking. SVM reports the address in
+         * EXITINFO1 bit 32 (GPA valid) and the walk in bit 33. QEMU's HVF backend only emulates an access
          * when both bits are set and otherwise just re-enters the guest.
          */
         const bool walk = (in.info1 & (1ull << 33)) != 0;
         out->qual   = (fetch ? (1u << 2) : write ? (1u << 1) : (1u << 0)) |
                       ((in.nptPerm & 1u) ? (1u << 3) : 0) | ((in.nptPerm & 2u) ? (1u << 4) : 0) |
-                      ((in.nptPerm & 4u) ? (1u << 5) : 0) |
-                      (1u << 7) | (walk ? 0 : (1u << 8));
-        out->gpa = in.info2;
+                      ((in.nptPerm & 4u) ? (1u << 5) : 0);
+        if (gpaValid)
+            out->qual |= (1u << 7) | (walk ? 0 : (1u << 8));
+        out->gpa = gpaValid ? in.info2 : 0;
         out->instrLen = 0;
         return true;
     }

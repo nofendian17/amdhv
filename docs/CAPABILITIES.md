@@ -12,6 +12,10 @@ make tools
 The probe forks/execs itself for the three probes that need a task without a VM (the in-kernel APIC
 variant, a second `hv_vm_create`, and the vCPU count). Everything else runs in one task.
 
+The enablement, SVM-core and framework checklist behind this matrix — including what is deliberately
+not implemented and the gap register — is in
+[COMPATIBILITY_CHECKLIST.md](COMPATIBILITY_CHECKLIST.md).
+
 ## What VZ actually calls
 
 A VZ VM on x86 is a userspace device model on top of a small hypervisor API. The live trap log of a
@@ -24,9 +28,9 @@ running VZ VM (`com.apple.Virtualization.VirtualMachine`, Kiri with six containe
 | thread 7 | `hv_vmx_vcpu_read_vmcs` (exit fields) | after every exit |
 | task 13 | `hv_vcpu_interrupt` | when the device model injects an IRQ |
 
-No in-kernel APIC, IOAPIC, PIO notifier or address-space call appears. That is why the missing
-stubs below do not stop VZ today: VZ emulates the APIC, the timer and every device itself and only
-needs memory mapping, vCPU state, VM exits and interrupt injection.
+No in-kernel APIC, IOAPIC, PIO notifier or address-space call appears in that log. That is why the
+remaining missing stubs below do not stop VZ today: VZ emulates the APIC, the timer and every device
+itself and only needs memory mapping, vCPU state, VM exits and interrupt injection.
 
 VZ uses `hv_vcpu_run_until`, not `hv_vcpu_run`: the live trap log shows `thread 1 vcpu_run_until` with
 arg `0xffffffffffffffff` (`HV_DEADLINE_FOREVER`) after every exit. (`hv_vcpu_run` has no deadline
@@ -97,7 +101,7 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vm_destroy` | yes | `HV_BUSY` while a vCPU or a trap still holds the VM |
 | `hv_vm_map` / `unmap` / `protect` | yes | map/protect require 4 KiB-aligned ranges; unmap accepts sub-page ranges and rounds them to page boundaries |
 | `hv_vm_sync_tsc` | yes | handed to vCPUs created later too |
-| `hv_vm_space_create` / `map_space` / `protect_space` / `unmap_space` / `space_destroy` | no | stubs answer `HV_UNSUPPORTED` |
+| `hv_vm_space_create` / `map_space` / `protect_space` / `unmap_space` / `space_destroy` | yes | up to 64 extra address spaces, each with its own NPT root; `space_destroy` answers `HV_BUSY` while a vCPU is bound to it |
 | `hv_vm_add_pio_notifier` / `remove` | no | stubs; VZ uses I/O exits instead |
 | `hv_vm_atpic_*` / `hv_vm_ioapic_*` / `hv_vm_lapic_*` | no | in-kernel APIC only, which `hv_vm_create` refuses |
 | `hv_vcpu_create` / `destroy` | yes | one vCPU per thread, up to 64 |
@@ -106,7 +110,8 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vcpu_enable_native_msr` / `set_msr_access` | yes | |
 | `hv_vcpu_read/write_fpstate` | yes | XSAVE, XCR0 |
 | `hv_vcpu_flush` | n/a | deprecated by Apple, always `HV_UNSUPPORTED` |
-| `hv_vcpu_invalidate_tlb` | yes | |
+| `hv_vcpu_invalidate_tlb` | yes | schedules a TLB flush for that vCPU's next entry |
+| `hv_vcpu_set_space` | yes | rebinds the vCPU's VMCB `nCR3` and flushes its ASID on the next entry |
 | `hv_vcpu_run` | yes | blocks until a VM exit; 10 ms host slice |
 | `hv_vcpu_run_until` | yes | finite deadline folded into the slice, reported as exit 52 |
 | `hv_vcpu_interrupt` | yes | IPI to the CPU in the guest |

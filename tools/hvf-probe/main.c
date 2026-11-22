@@ -361,6 +361,17 @@ int main(int argc, char **argv)
     setupControls(v);
     setupRealMode(v, 0x1000);
 
+    hv_vm_space_t vspace = 0;
+    r = hv_vm_space_create(&vspace);
+    line("hv_vm_space_create (for set_space)", r);
+    if (r == HV_SUCCESS) {
+        line("hv_vcpu_set_space(space)", hv_vcpu_set_space(v, vspace));
+        line("hv_vm_space_destroy while bound", hv_vm_space_destroy(vspace));
+        line("hv_vcpu_set_space(default)", hv_vcpu_set_space(v, HV_VM_SPACE_DEFAULT));
+        line("hv_vcpu_set_space(unknown)", hv_vcpu_set_space(v, vspace + 1000));
+        line("hv_vm_space_destroy", hv_vm_space_destroy(vspace));
+    }
+
     uint64_t t = 0;
     line("hv_vcpu_read_register(RIP)", hv_vcpu_read_register(v, HV_X86_RIP, &t));
     line("hv_vcpu_write_msr(LSTAR)", hv_vcpu_write_msr(v, 0xC0000082, 0xffffff8000100000ull));

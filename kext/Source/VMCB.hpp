@@ -202,7 +202,7 @@ static const uint32_t INT_CTL_V_INTR_MASKING = 1u << 24;
 static const uint64_t NESTED_CTL_NP_ENABLE = 1ull << 0;
 
 /* control.tlbCtl */
-enum : uint8_t { TLB_DO_NOTHING = 0, TLB_FLUSH_ALL = 1 };
+enum : uint8_t { TLB_DO_NOTHING = 0, TLB_FLUSH_ALL = 1, TLB_FLUSH_BY_ASID = 3 };
 
 /* SVM exit codes the kernel itself cares about (users get the raw value too). */
 enum : uint64_t {

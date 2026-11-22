@@ -4,6 +4,7 @@
 
 #include "KernelDecls.hpp"
 #include "Log.hpp"
+#include "SleepPolicy.hpp"
 #include "SVM.hpp"
 #include "X86.hpp"
 
@@ -44,6 +45,7 @@ volatile SInt32           gSeen;      /* CPUs that ran probeAction */
 volatile SInt32           gMaxIndex;  /* highest cpu_number() seen */
 volatile bool             gReadMsrs = true;   /* set before the probe rendezvous */
 bool                      gSuspended;
+uint64_t                  gSleepEpoch;          /* bumped on suspend/resume: see SleepPolicy.hpp */
 
 bool cpuUsable(const CpuProbe &p)
 {
@@ -182,9 +184,12 @@ void verifyAction(void *)
 
 bool allocHostSave(uint32_t cpu)
 {
-    /* One 4K page, physically contiguous, 4K aligned, below 2^52. */
+    /* One 4K page, physically contiguous, 4K aligned, below 2^52.
+     * kIOMemoryMapperNone: the page is addressed by physical address (VM_HSAVE_PA), never DMA-mapped.
+     * Without it IOBufferMemoryDescriptor asks IOMapper::checkForSystemMapper(), which at boot waits
+     * for the system mapper and prints the "waitForSystemMapper" backtrace with this kext in it. */
     IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, 4096,
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone, 4096,
         0x000FFFFFFFFFF000ULL);
     if (!md) {
         AMDHV_ERR("cpu %u: host save area: allocation failed", cpu);
@@ -338,8 +343,31 @@ void disableAll()
     freeHostSave();
 }
 
+void noteSuspend()
+{
+    /* Probe-only and stopped kexts have nothing to tear down. Without this guard a suspend would
+     * set the flag and resume() would enable SVM on a machine that never asked for it. */
+    if (!gWantEnabled && gActive == 0)
+        return;
+    amdhv::svm::beginSuspend(gSuspended, gSleepEpoch);
+}
+
+void noteResume()
+{
+    amdhv::svm::noteWake(gSleepEpoch);
+}
+
+uint64_t sleepEpoch()
+{
+    return __atomic_load_n(&gSleepEpoch, __ATOMIC_ACQUIRE);
+}
+
 void suspend()
 {
+    /* Before the rendezvous, not after: see SleepPolicy.hpp. A vCPU that is about to call
+     * ensureThisCpu() must see the suspend and leave EFER.SVME alone. */
+    noteSuspend();
+
     if (!gActive)
         return;
 
@@ -347,21 +375,29 @@ void suspend()
     mp_rendezvous_no_intrs(disableAction, nullptr);
     gActive    = 0;
     bzero(gOn, sizeof(gOn));
-    gSuspended = true;
 }
 
 uint32_t resume()
 {
     if (!gSuspended)
         return 0;
+    if (!gWantEnabled) {
+        /* Defensive: a suspended flag with SVM never enabled (or already stopped) must not turn
+         * SVM on at wake. */
+        amdhv::svm::endResume(gSuspended, gSleepEpoch);
+        return 0;
+    }
 
     AMDHV_SYNC("wake: turning SVM back on");
-    gSuspended = false;
     gActive    = 0;
     bzero(gOn, sizeof(gOn));
     mp_rendezvous_no_intrs(enableAction, nullptr);
 
     uint32_t active = (uint32_t)gActive;
+    /* Clear "suspended" even when the re-enable was partial: rescan() can finish it, and
+     * activeOnAllUsable() still refuses to run a guest until every usable CPU is back. */
+    amdhv::svm::endResume(gSuspended, gSleepEpoch);
+
     if (active != usableCount())
         AMDHV_ERR("wake: only %u of %u CPUs re-enabled", active, usableCount());
     else
@@ -413,11 +449,16 @@ uint32_t activeCpuCount()
 
 bool activeOnAllUsable()
 {
-    return !gSuspended && gActive > 0 && (uint32_t)gActive == usableCount();
+    return canEnterGuest(gSuspended, (uint32_t)gActive, usableCount());
 }
 
 int ensureThisCpu()
 {
+    /* A suspend may be in progress on another CPU. Do not repair EFER.SVME/VM_HSAVE_PA now: the
+     * suspend rendezvous is about to clear them (or already did), and the caller must not VMRUN. */
+    if (gSuspended)
+        return -3;
+
     int cpu = cpu_number();
     if (cpu < 0 || cpu >= AMDHV_MAX_CPUS)
         return -1;

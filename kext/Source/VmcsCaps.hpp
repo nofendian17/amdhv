@@ -112,8 +112,10 @@ constexpr ControlCaps procBasedCaps(bool tprShadow)
 
 /*
  * Secondary processor-based controls. NPT (the AMD equivalent of EPT), RDTSCP, WBINVD exiting,
- * unrestricted real-mode guests and INVPCID are available. VPID is not: the kext flushes the whole
- * TLB on every run, so advertising it would only promise a feature that is not there.
+ * unrestricted real-mode guests and INVPCID are available. VPID is still not offered: the kext uses
+ * SVM ASIDs internally (one per vCPU) and honors hv_vcpu_invalidate_tlb, but the Intel INVVPID model
+ * that this capability word promises is not part of the API it implements. Accepting the bit remains
+ * a compatibility no-op for clients that set it anyway.
  */
 constexpr ControlCaps procBased2Caps()
 {

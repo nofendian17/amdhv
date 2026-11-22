@@ -5,6 +5,9 @@ name: Release
 #
 #   Trigger:  push a tag (v0.1.0, ...) or run it by hand from the Actions tab.
 #   The tag should match the version in kext/Info.plist.
+#   Release notes: the install paragraph is static; the changelog below it is
+#   built from the commit subjects since the previous v* tag, grouped by type.
+#   Write commit subjects for the release, because they are user-visible.
 
 on:
   push:
@@ -19,6 +22,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the release notes list the commits since the previous tag.
+          fetch-depth: 0
 
       - name: Build kext and tools
         run: make kext tools
@@ -42,7 +48,55 @@ jobs:
           git archive --format=tar.gz -o "amdhv-${V}-source.tar.gz" HEAD
           ls -la amdhv-${V}-*.tar.gz
 
+      - name: Build release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          PREV="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then RANGE="${PREV}..${TAG}"; else RANGE="${TAG}"; fi
+
+          {
+            cat <<'EOF'
+          Unsigned kext for OpenCore (Kernel -> Add). Install with scripts/install-to-efi.sh — needs the two boot-args amdhv_enable_svm=1 amdhv_hv=1. Binaries are x86_64; unit tests are meant to run on the target machine (make test).
+
+          EOF
+            if [ -n "$PREV" ]; then echo "## Changes since \`${PREV}\`"; else echo "## Changes"; fi
+            echo
+
+            git log --no-merges --pretty=format:'%s%x09%h' "$RANGE" | awk -F '\t' '
+              function bucket(s) {
+                if (s ~ /^feat(\([^)]*\))?:/)            return "Added";
+                if (s ~ /^fix(\([^)]*\))?:/)             return "Fixed";
+                if (s ~ /^(perf|refactor)(\([^)]*\))?:/) return "Changed";
+                if (s ~ /^docs(\([^)]*\))?:/)            return "Documentation";
+                if (s ~ /^(test|chore|build|ci)(\([^)]*\))?:/) return "Maintenance";
+                return "Other";
+              }
+              {
+                subject = $1;
+                key = bucket(subject);
+                sub(/^(feat|fix|perf|refactor|docs|test|chore|build|ci)(\([^)]*\))?: /, "", subject);
+                items[key] = items[key] sprintf("- %s (`%s`)\n", subject, $2);
+              }
+              END {
+                n = split("Added Fixed Changed Documentation Maintenance Other", order, " ");
+                for (i = 1; i <= n; i++) {
+                  if (order[i] in items) printf "### %s\n\n%s\n", order[i], items[order[i]];
+                }
+              }'
+
+            if [ -n "$PREV" ]; then
+              echo "**Full Changelog**: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+          } > release-notes.md
+
+          cat release-notes.md
+
       - name: Create GitHub release
+        # A manual run from a branch only builds and packages; publishing needs a tag.
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -51,5 +105,6 @@ jobs:
           gh release create "$TAG" \
             "amdhv-${V}-macos-x86_64.tar.gz" \
             "amdhv-${V}-source.tar.gz" \
+            --verify-tag \
             --title "AMDHV ${TAG}" \
-            --notes "Unsigned kext for OpenCore (Kernel -> Add). Install with scripts/install-to-efi.sh — needs the two boot-args amdhv_enable_svm=1 amdhv_hv=1. Binaries are x86_64; unit tests are meant to run on the target machine (make test)."
+            --notes-file release-notes.md

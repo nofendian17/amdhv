@@ -17,6 +17,7 @@
 
 #include <string.h>
 
+#include "CleanBits.hpp"
 #include "MsrMap.hpp"
 #include "VmxMap.hpp"
 #include "VmcsCaps.hpp"
@@ -39,6 +40,7 @@ enum : uint32_t {
     F_CR0_MASK           = 0x6000,
     F_CR4_MASK           = 0x6002,
     F_GUEST_CR0          = 0x6800,
+    F_GUEST_CR3          = 0x6802,
     F_GUEST_CR4          = 0x6804,
     F_RO_INSTR_ERROR     = 0x4400,
     F_RO_EXIT_REASON     = 0x4402,
@@ -135,6 +137,20 @@ public:
     void attach(amdhv::vmcb::Vmcb *vmcb) { fVmcb = vmcb; }
     void reset() { memset(fShadow, 0, sizeof(fShadow)); memset(fDr, 0, sizeof(fDr)); fTscAux = 0; }
 
+    /*
+     * VMCB clean bits. The caller marks all groups clean after a successful VMRUN, and markAllDirty()
+     * when the vCPU moves to another CPU. Every write through this class clears the group it touches;
+     * applyControls() does the same for the fields it writes directly. Only call markAllClean() when
+     * the CPU reports VMCB_CLEAN, otherwise the field must stay 0.
+     */
+    void markDirty(unsigned bit)
+    {
+        if (bit < 32)
+            fVmcb->control.clean &= ~(1u << bit);
+    }
+    void markAllDirty() { fVmcb->control.clean = 0; }
+    void markAllClean() { fVmcb->control.clean = amdhv::vmcb::kCleanableMask; }
+
     /* Whether the TPR shadow is offered to clients of this VM (Frontend.cpp's gTprShadow). It only affects which
      * control bits are accepted: the shadow itself keeps working if a client sets it while the switch is off. */
     void setTprShadow(bool on) { fTprShadow = on; }
@@ -142,6 +158,9 @@ public:
     /* IA32_TSC_AUX of the guest (RDTSCP): the kext puts it in the real MSR while the guest runs. 32 bits. */
     uint64_t tscAux() const { return fTscAux; }
     void     setTscAux(uint64_t v) { fTscAux = v & 0xFFFFFFFFull; }
+
+    /* Pause intercept filtering (AMD APM Vol. 2, 15.14.4). Only the fields the CPU reports are used. */
+    void setPauseFilter(bool count, bool thresh) { fPauseFilter = count; fPauseThresh = thresh; }
 
     /* DR0-DR3 of the guest. The kext loads them into the CPU around VMRUN, VMRUN itself does not. */
     uint64_t dr(unsigned i) const { return fDr[i & 3]; }
@@ -304,16 +323,35 @@ public:
         }
         c.intCtl |= INT_CTL_V_INTR_MASKING;
 
+        const uint32_t oldV3 = c.interceptVec3, oldV4 = c.interceptVec4;
+        const uint32_t oldCr = c.interceptCr, oldDr = c.interceptDr;
+        /*
+         * Pause filtering: a guest that spins on PAUSE should not exit on every iteration. The count is
+         * loaded into an internal counter on VMRUN and decremented per PAUSE; the threshold (when the CPU
+         * has it) resets the counter when the PAUSEs are far apart. Both fields are reserved when the CPU
+         * does not report the feature, so they stay zero then.
+         */
+        const uint16_t oldPfc = c.pauseFilterCount, oldPft = c.pauseFilterThresh;
+        c.pauseFilterCount  = ((cpu & CPU_PAUSE_EXIT) && fPauseFilter) ? 3000 : 0;
+        c.pauseFilterThresh = ((cpu & CPU_PAUSE_EXIT) && fPauseThresh) ? 128 : 0;
         c.interceptVec3 = v3;
         c.interceptVec4 = v4;
         c.interceptCr   = cr;
         c.interceptDr   = (cpu & CPU_MOV_DR_EXIT) ? 0xFFFFFFFFu : 0;
         /* interceptExc is the exception bitmap itself (F_EXC_BITMAP maps straight onto it). */
+        if (oldV3 != c.interceptVec3 || oldV4 != c.interceptVec4 ||
+            oldCr != c.interceptCr || oldDr != c.interceptDr ||
+            oldPfc != c.pauseFilterCount || oldPft != c.pauseFilterThresh)
+            markDirty(CLEAN_INTERCEPTS);
 
         /* The EFER.LMA bit follows the "IA-32e mode guest" entry control, like VM entry does. */
-        uint64_t efer = fVmcb->save.efer | EFER_SVME;
+        const uint64_t oldEfer = fVmcb->save.efer;
+        uint64_t efer = oldEfer | EFER_SVME;
         if (get(F_VMENTRY_CONTROLS) & ENTRY_IA32E_GUEST) efer |= EFER_LMA; else efer &= ~EFER_LMA;
-        fVmcb->save.efer = efer;
+        if (efer != oldEfer) {
+            fVmcb->save.efer = efer;
+            markDirty(CLEAN_CR);
+        }
 
         fVmcb->save.rflags |= 2;                        /* bit 1 is always set */
 
@@ -394,6 +432,7 @@ public:
             return write(F_GUEST_EFER, value);
         case msr::K_TSC:
             fVmcb->control.tscOffset = value - hostTsc;
+            markDirty(amdhv::vmcb::CLEAN_INTERCEPTS);   /* TSC offset is in the intercepts group */
             return R_OK;
         case msr::K_TSC_AUX:
             setTscAux(value);
@@ -438,6 +477,10 @@ private:
     {
         /* A 32-bit VMCS field into a 64-bit VMCB slot (SYSENTER_CS) is stored zero-extended. */
         memcpy(reinterpret_cast<uint8_t *>(fVmcb) + off, &v, size);
+        /* The processor may reuse its cached copy of a clean group: every write must dirty it. */
+        const amdhv::vmcb::CleanBit bit = amdhv::vmcb::cleanBitForOffset(off);
+        if (bit < 32)
+            fVmcb->control.clean &= ~(1u << bit);
     }
 
     void set(uint32_t enc, uint64_t v)
@@ -452,6 +495,8 @@ private:
     uint64_t         fDr[4];
     uint64_t         fTscAux = 0;
     bool             fTprShadow;
+    bool             fPauseFilter = false;
+    bool             fPauseThresh = false;
 };
 
 } // namespace vmx

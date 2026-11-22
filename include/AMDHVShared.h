@@ -187,7 +187,7 @@ enum {
     AMDHV_EXIT_IO,           /* IN/OUT, decode with amdhv_ioio_*() */
     AMDHV_EXIT_CPUID,
     AMDHV_EXIT_MSR,          /* info1: 0 = RDMSR, 1 = WRMSR; ECX = MSR */
-    AMDHV_EXIT_NPF,          /* nested page fault, info2 = guest physical address */
+    AMDHV_EXIT_NPF,          /* nested page fault; info2 = GPA only when info1 bit 32 is set */
     AMDHV_EXIT_SHUTDOWN,     /* triple fault */
     AMDHV_EXIT_INVALID,      /* VMRUN rejected the VMCB, see the kernel log */
     AMDHV_EXIT_VMMCALL,
@@ -316,11 +316,13 @@ static inline uint32_t amdhv_ioio_size(uint64_t info1)
 
 /*
  * NPF exit decoding (EXITINFO1 of SVM exit 0x400, AMD APM Vol.2, 15.25.6).
- * Bits 31:0 are a #PF-style error code, info2 is the faulting guest physical address.
+ * Bits 31:0 are a #PF-style error code. EXITINFO2 is the faulting guest physical address only when
+ * bit 32 says so (DecodeAssists); otherwise it must not be used as a GPA.
  */
 static inline int amdhv_npf_present(uint64_t info1)  { return (int)(info1 & 1); }          /* page was mapped but rights were insufficient */
 static inline int amdhv_npf_is_write(uint64_t info1) { return (int)((info1 >> 1) & 1); }
 static inline int amdhv_npf_is_fetch(uint64_t info1) { return (int)((info1 >> 4) & 1); }
+static inline int amdhv_npf_gpa_valid(uint64_t info1) { return (int)((info1 >> 32) & 1); } /* EXITINFO2 is a guest physical address */
 static inline int amdhv_npf_in_walk(uint64_t info1)  { return (int)((info1 >> 33) & 1); }  /* fault while the CPU read the guest's own page tables */
 
 /* CPUID helpers, pure functions so they can be unit-tested on any host. */

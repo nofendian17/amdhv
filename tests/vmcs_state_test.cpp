@@ -262,7 +262,7 @@ void testRecordExit()
 
     /* EPT violation: write to a page that is read/execute only. */
     f.vmcb.control.exitCode = EXIT_NPF;
-    f.vmcb.control.exitInfo1 = 0x7;
+    f.vmcb.control.exitInfo1 = (1ull << 32) | 0x7;      /* bit 32: EXITINFO2 is a GPA (DecodeAssists) */
     f.vmcb.control.exitInfo2 = 0x101010;
     f.vmcb.control.nextRip = 0;
     CHECK(f.st.recordExit(1 | 4) && rd(f, 0x4402) == VMX_EPT_VIOLATION && rd(f, 0x2400) == 0x101010);

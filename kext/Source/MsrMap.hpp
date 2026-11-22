@@ -85,6 +85,21 @@ static inline bool intelOnlySpecMsr(uint32_t msr)
     return msr == 0x48 || msr == 0x49;
 }
 
+/*
+ * MSRs that must stay intercepted even when the client asks for native access
+ * (hv_vcpu_enable_native_msr). The call still answers success; run() emulates the access instead:
+ *
+ *   K_EFER  the guest EFER must keep SVME set, so it can never be written without an exit.
+ *   K_TSC   SVM adds TSC_OFFSET on reads only (RDTSC/RDTSCP/RDMSR 10h). A native WRMSR 10h would
+ *           write the *host* TSC, so the write must go through the offset, as msrOp() does.
+ *   0x48/49 Intel-only speculation MSRs; AMD has no such MSR, so a native access would #GP.
+ */
+static inline bool mustIntercept(uint32_t msr)
+{
+    Info i = info(msr);
+    return i.kind == K_EFER || i.kind == K_TSC || intelOnlySpecMsr(msr);
+}
+
 /* Is `msr` an address a guest could even write to the 8 KiB map? */
 static const size_t kMsrpmSize = 8192;
 

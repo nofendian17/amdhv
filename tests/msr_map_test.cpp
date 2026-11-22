@@ -36,6 +36,24 @@ int main()
           !intelOnlySpecMsr(MSR_EFER));
     CHECK(info(0x48).kind == K_UNKNOWN && info(0x49).kind == K_UNKNOWN);
 
+    /*
+     * MSRs that must stay intercepted even when the client asks for native access. TSC is the one with a
+     * host-safety consequence: SVM applies TSC_OFFSET to reads only, so a native WRMSR 10h would write the
+     * physical TSC. TSC_AUX is deliberately not here: the kext swaps it around VMRUN, so a native write is
+     * captured after the exit.
+     */
+    CHECK(mustIntercept(MSR_TSC));
+    CHECK(mustIntercept(MSR_EFER));
+    CHECK(mustIntercept(0x48) && mustIntercept(0x49));
+    CHECK(!mustIntercept(MSR_LSTAR) && !mustIntercept(MSR_FS_BASE) && !mustIntercept(MSR_TSC_AUX) &&
+          !mustIntercept(0x1B) && !mustIntercept(0x80));
+    /* The guard is load-bearing: setNative() alone would clear the TSC intercept. */
+    {
+        uint8_t tscMap[kMsrpmSize];
+        memset(tscMap, 0xFF, sizeof(tscMap));
+        CHECK(setNative(tscMap, MSR_TSC, true) && isNative(tscMap, MSR_TSC));
+    }
+
     /* MSRPM layout, checked against the manual's examples. */
     uint32_t off; unsigned bit;
     CHECK(msrpmBit(0x00000000, &off, &bit) && off == 0x0000 && bit == 0);
