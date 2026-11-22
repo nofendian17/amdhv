@@ -92,13 +92,11 @@ CPU, `amd-info selftest` passes, and `enableFailures` stays 0.
 ### 2.2 SVM features probed but not used
 
 These are visible in `CPUID Fn8000_000A EDX` and in `AMDHVInfo.svmFeatures`, but no code path turns
-them on. They are candidates for the roadmap, not current capabilities.
+them on. They are candidates for the roadmap, not current capabilities. (`VMCB_CLEAN`,
+`DECODE_ASSISTS` and `PAUSE_FILTER`/`PAUSE_THRESH` are used now; see 2.1.)
 
 | Feature | Status | Why it matters |
 | --- | --- | --- |
-| `VMCB_CLEAN` | **No** | Avoids rewriting unchanged VMCB fields on every run |
-| `DECODE_ASSISTS` | **No** | Lets the CPU fill in exit information instead of decoding instructions |
-| `PAUSE_FILTER` / `PAUSE_THRESH` | **No** | Traps PAUSE loops only after a threshold |
 | `AVIC` | **No** | In-kernel APIC; Hypervisor.framework refuses `HV_VM_ACCEL_APIC`, so VZ does not need it |
 | `VGIF` | **No** | Virtual GIF; host still uses `CLGI`/`STGI` |
 | `vVMSAVE/VMLOAD` | **No** | Nested VMSAVE/VMLOAD virtualization |
