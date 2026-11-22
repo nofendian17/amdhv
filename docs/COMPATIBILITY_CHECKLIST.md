@@ -382,6 +382,21 @@ or build time to tell this binary from the previous one.
    state, the first suspect is the clean-bit reload in `run()` (sleep epoch); set
    `control.clean = 0` in `run()` to bisect.
 
+   First hardware attempt, 2026-11-22 22:02 (boot 21:53): the host never entered S3.
+   `pmset -g log` reports `Total Sleep/Wakes since boot: 0`, and `kern.sleeptime`,
+   `kern.sleep_abs_time` and `kern.hibernatecount` stay 0, so `amd-info stats` shows
+   `sleepEvents = 0` and `wakeEvents = 0`. The kernel log shows why: a software sleep at 22:02:10 did
+   the full-to-dark transition (`=== START ... f->9`, `dark wake entry` at 22:02:12), and a display
+   tickle at 22:02:24 promoted it back to full wake. The system-sleep transition that actually cuts
+   power never ran. The kext is registered correctly: it is in the priority client list
+   (`kIOMessageSystemCapabilityChange[6] to com.amdhv.AMDHV`), and its handler acknowledges
+   immediately (returns `kIOReturnSuccess`, leaving `notify.returnValue` at 0), so no
+   `acknowledgeSleepWakeNotification()` is needed. XNU only sends `kIOMessageSystemWillSleep` to
+   kernel priority clients from the `kSystemTransitionSleep` branch; `systemMessageFilter()` requires
+   `kSystemMessageClientKernel`, which the full-to-dark branch clears. The zero counters are
+   therefore expected and are not a kext fault. Acceptance still requires a boot that reaches S3:
+   `kern.sleeptime` becomes non-zero, then `sleepEvents = 1`, `wakeEvents = 1`.
+
 ### Appendix — panic evidence seen on 2026-11-22
 
 Three panic reports were present: two identical page faults with `CR2 = 0xfed80310` and the same
