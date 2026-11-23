@@ -109,16 +109,16 @@ void testLapicRegisters()
     CHECK(amdhv::apic::readReg(s, 0x350) == 0xE0);
     CHECK(amdhv::apic::readReg(s, 0x777) == 0);
     uint8_t ext[8 + sizeof(amdhv::apic::LapicState)] = {0};
-    amdhv::apic::readState(s, ext);
+    amdhv::apic::encodeState(s, ext);
     uint32_t ver = 0;
     memcpy(&ver, ext, 4);
     CHECK(ver == 100);
     amdhv::apic::LapicState copy;
     amdhv::apic::reset(copy);
-    CHECK(amdhv::apic::writeState(copy, ext));
+    CHECK(amdhv::apic::decodeState(copy, ext));
     CHECK(amdhv::apic::readReg(copy, 0x080) == 0x50);
     ext[0] = 0;                                   /* wrong version must be refused */
-    CHECK(!amdhv::apic::writeState(copy, ext));
+    CHECK(!amdhv::apic::decodeState(copy, ext));
 }
 
 void testLayouts()

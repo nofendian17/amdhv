@@ -1348,13 +1348,18 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
         return kHvOk;
     }
     case 0xe003:                                     /* put_state */
-    case 0x0003:
-        return amdhv::apic::writeState(v->lapic, (const void *)(uintptr_t)(w[0] >> 8))
-                   ? kHvOk : kHvError;
+    case 0x0003: {
+        uint8_t buf[8 + sizeof(amdhv::apic::LapicState)];
+        if (copyin((user_addr_t)(w[0] >> 8), buf, sizeof(buf)))
+            return kHvError;
+        return amdhv::apic::decodeState(v->lapic, buf) ? kHvOk : kHvError;
+    }
     case 0xe004:                                     /* get_state */
-    case 0x0004:
-        amdhv::apic::readState(v->lapic, (void *)(uintptr_t)(w[0] >> 8));
-        return kHvOk;
+    case 0x0004: {
+        uint8_t buf[8 + sizeof(amdhv::apic::LapicState)];
+        amdhv::apic::encodeState(v->lapic, buf);
+        return copyout(buf, (user_addr_t)(w[0] >> 8), sizeof(buf)) ? kHvError : kHvOk;
+    }
     case 0x0006: {                                   /* apic_ctrl: controls pointer */
         uint64_t ctrls = 0;
         if (p1 && copyin(p1, &ctrls, 8) == 0)

@@ -173,20 +173,22 @@ inline void writeReg(LapicState &s, uint32_t off, uint32_t value)
     else if (off >= 0x320 && off <= 0x370 && ((off - 0x320) & 0xF) == 0) s.lvt[(off - 0x320) >> 4] = value;
 }
 
-inline void readState(const LapicState &s, void *ext)
+/* Encode/decode into a KERNEL buffer. The caller then uses copyout/copyin for the user pointer:
+ * memcpy straight to userspace faults under SMAP. */
+inline void encodeState(const LapicState &s, void *kernelExt)
 {
     const uint32_t ver = 100;                 /* HV_APIC_STATE_EXT_VER */
-    memcpy(ext, &ver, 4);                     /* +4 is padding in the SDK struct */
-    memcpy((uint8_t *)ext + 8, &s, sizeof(s));
+    memcpy(kernelExt, &ver, 4);               /* +4 is padding in the SDK struct */
+    memcpy((uint8_t *)kernelExt + 8, &s, sizeof(s));
 }
 
-inline bool writeState(LapicState &s, const void *ext)
+inline bool decodeState(LapicState &s, const void *kernelExt)
 {
     uint32_t ver = 0;
-    memcpy(&ver, ext, 4);
+    memcpy(&ver, kernelExt, 4);
     if (ver != 100)                           /* HV_APIC_STATE_EXT_VER */
         return false;
-    memcpy(&s, (const uint8_t *)ext + 8, sizeof(s));
+    memcpy(&s, (const uint8_t *)kernelExt + 8, sizeof(s));
     return true;
 }
 

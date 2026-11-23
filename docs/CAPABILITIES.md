@@ -350,9 +350,10 @@ the `hv_ioapic_state_ext_t` layout: state starts at offset `+8`, not `+4`; the 4
 mask bit appear set. `offsetof` on the macOS 15 SDK gives `ioapic=8`, `apic=8`, `atpic=4`.
 
 Only the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR`; they never reach a trap and appear
-to be answered by Apple's userspace layer. This is still not full compatibility with every APIC
-sub-op: thread-13 state read/write semantics are accepted as no-ops, and guest-visible routing is
-limited to the 8259A/IOAPIC → LAPIC IRR path exercised above.
+to be answered by Apple's userspace layer. Thread-13 LAPIC read/write/get/put state now uses the
+register model, but that path caused an SMAP panic when it copied straight to a user pointer; it was
+rebuilt with `copyout`/`copyin` through a kernel buffer and still needs a reboot to be re-verified.
+Guest-visible routing is exercised only for the 8259A/IOAPIC → LAPIC IRR path above.
 
 ## A framework quirk worth knowing
 
