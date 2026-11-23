@@ -250,8 +250,8 @@ and appear to be answered by Apple's userspace layer.
 
 Two calls remain broken in that build: IOAPIC get/put state. The diagnostic showed the framework
 puts the state pointer in the arg block's `a` word (`0x7ff7...`) and a cookie in `b`
-(`0x6daa0aab09840009`); the handler had used `b`. The fix is in this tree and needs a reboot to
-confirm. Thread-13 blocks are logged as no-ops: `0` (inject_extint), `0x8001`/`0x8002` (apic
+(`0x6daa0aab09840009`); the handler had used `b`. The fix was confirmed on the installed kext:
+both calls now answer `ok`. Thread-13 blocks are logged as no-ops: `0` (inject_extint), `0x8001`/`0x8002` (apic
 read/write, three pointer words), a tagged pointer to a nested block (get/put state), `0x6` (ctrl),
 `0x107` (LVT trigger), `0x5` (LSC enter/invalidate). Their nested contents are still not decoded.
 

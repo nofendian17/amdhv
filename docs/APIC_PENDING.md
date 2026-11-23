@@ -63,3 +63,12 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
 The last debug builds each needed a reboot to learn one more pointer level. All that information is
 now consolidated here and in the tree, so the next reboot is for one combined verification, not for
 another discovery step.
+
+## Final verification (kext `956E1EFA-E680-3EF5-846A-857F5939D6A3`)
+
+- UUID of the loaded kext matches the built kext exactly.
+- `hvf-probe --apic`: 31 calls answer `ok`; only the five `hv_vcpu_exit_*` helpers answer `HV_ERROR`.
+- `hvf-probe --apic-run`: still exits at `RIP 0x1200` (guest interrupt delivered).
+- `hvf-probe`: `79 of 79`, `hv_vm_create(HV_VM_ACCEL_APIC)` `ok`, 64/64 vCPU, deadline exit 52.
+- `hvf-smoke`: `PASS`; `make test`: 17/17.
+- All failure counters (`vmInvalidExits`, `assertFailures`, `enableFailures`, `vmFpuMismatches`) are 0.
