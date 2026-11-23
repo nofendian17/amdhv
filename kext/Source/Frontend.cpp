@@ -140,6 +140,7 @@ volatile SInt32 gLiveVms = 0;
 /* The TPR shadow (VMX control bit 21) is offered to every VM: it lets Windows change its CR8 without a VM exit, which is most of the exits of
  * a Windows boot. On by default; the boot-arg amdhv_tpr_shadow=0 or `amd-info hv tpr 0` turns it off for the VMs created from then on. */
 volatile int gTprShadow = 1;
+volatile int gApicAccel = 0;                           /* amdhv_apic=1: let clients ask for hv_vm_create(HV_VM_ACCEL_APIC) */
 
 volatile int *gSupportPtr = nullptr;                 /* the kernel's hv_support_available once located and written */
 int gSupportSaved = 0;
@@ -181,6 +182,7 @@ struct HvVm {
     uint32_t roArrOff;                         /* offset of the per-vCPU 4 KiB pages (managed MSR lists) in the ro area */
     uint64_t tscOffset;                        /* from hv_vm_sync_tsc, handed to vCPUs created later */
     bool     tscValid;
+    bool     apicAccel;                        /* created with HV_VM_ACCEL_APIC (opt-in, see gApicAccel) */
     uint64_t caps[amdhv::vmx::CAP_COUNT];      /* the VMX capability words this VM's client was shown (HV_VMX_CAP_*), also what thread trap 12 answers from */
     HvVcpu *vcpu[kMaxVcpus];
     uint32_t nVcpus;
@@ -338,12 +340,15 @@ kern_return_t tVmCreate(void *target, uint64_t arg)
     struct { uint64_t flags, info; } a = {0, 0};
     if (copyin((user_addr_t)arg, &a, sizeof(a)))
         return kHvError;
-    if (a.flags & 0x400)
-        return kHvUnsupportedCode;                   /* the in-kernel APIC variant */
+    if ((a.flags & 0x400) && !gApicAccel)
+        return kHvUnsupportedCode;              /* the in-kernel APIC variant is opt-in while its handlers are built */
     uint64_t info[kInfoBytes / 8];
     HvVm *vm = vmCreate(info);
     if (!vm)
         return kHvNoRes;
+    vm->apicAccel = (a.flags & 0x400) != 0;
+    if (vm->apicAccel)
+        AMDHV_INFO("hv front end: VM created with the in-kernel APIC requested");
     if (copyout(info, (user_addr_t)a.info, kInfoBytes)) {
         vmFree(vm);
         return kHvError;
@@ -1408,6 +1413,9 @@ void start(com_amdhv_AMDHV *service)
     uint32_t tprArg = 1;
     if (PE_parse_boot_argn("amdhv_tpr_shadow", &tprArg, sizeof(tprArg)))
         gTprShadow = tprArg ? 1 : 0;
+    uint32_t apicArg = 0;
+    if (PE_parse_boot_argn("amdhv_apic", &apicArg, sizeof(apicArg)))
+        gApicAccel = apicArg ? 1 : 0;
     if (!PE_parse_boot_argn("amdhv_hv", &v, sizeof(v)) || v == 0)
         return;
     if (!setMode(v))

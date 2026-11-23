@@ -324,6 +324,19 @@ None of these clients is officially supported by this project. See the
 QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding fixed
 (commit `356d903`); without it QEMU aborts with `HV_BAD_ARGUMENT` before the guest starts.
 
+## In-kernel APIC work (Phase 3, in progress)
+
+The 34 refused calls are not all blocked in the kext: with a default VM, Apple's framework answers
+most of them in userspace before any trap is reached. A follow-log capture of `hvf-probe --matrix`
+shows only `hv_vm_lapic_msi` reaching task trap 11; the gate is `hv_vm_create(HV_VM_ACCEL_APIC)`,
+which the provider refused.
+
+The first slice adds a host-testable register model (`kext/Source/ApicState.hpp`,
+`tests/apic_test.cpp`) whose LAPIC/IOAPIC/8259A layouts match the SDK state structs byte for byte.
+`tVmCreate` accepts `HV_VM_ACCEL_APIC` only with boot-arg `amdhv_apic=1` (default off) so a
+development build can reveal the argument blocks of the APIC sub-ops. No sub-op is implemented yet;
+nothing here is advertised as support, and no live APIC result exists.
+
 ## A framework quirk worth knowing
 
 Calling `hv_vm_create` a second time in one task answers `HV_BUSY` (correct), but then

@@ -17,7 +17,7 @@ Each row is marked with evidence, not intent. Status meanings:
 | **n/a** | Not applicable to this design. |
 
 Baseline used for this revision (2026-11-23, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
-AMDHV 0.2.0 + Phase 1): `make test` passes all 16 tests, `hvf-probe` prints `64 of 64` vCPUs with
+AMDHV 0.2.0 + Phase 1): `make test` passes all 17 tests, `hvf-probe` prints `64 of 64` vCPUs with
 `run_until(past deadline)` in microseconds, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
 `enableFailures`, `vmInvalidExits`, `assertFailures` and `vmFpuMismatches` at 0. Re-run those four
 after every change; a checklist row without evidence is a hypothesis. `amd-info info` reports 32768
@@ -235,8 +235,25 @@ a kext trap of its own.
 
 The two Phase 1 changes are live-verified on the installed kext (UUID
 `D7CA29BF-7FA7-3C02-89EA-C22F24539562`): `hvf-probe --matrix` now shows the TSC offset at `0x1000`
-after a guest run and `set_shadow_access` answering `ok`. `make test` is 16/16, `hvf-smoke` passes,
+after a guest run and `set_shadow_access` answering `ok`. `make test` is 17/17, `hvf-smoke` passes,
 and `vmInvalidExits`, `assertFailures`, `enableFailures` and `vmFpuMismatches` stayed at zero.
+
+### 3.5 Phase 3, slice 1: APIC foundation (not yet live-verified)
+
+Most of the 34 refused calls never reach the provider at all: with a default VM Apple's framework
+answers `HV_UNSUPPORTED` in userspace. A follow-log capture of `hvf-probe --matrix` shows only
+`hv_vm_lapic_msi` reaching task trap 11 (arg `0x4000fee00000`) and the already handled task 8/9 and
+thread 8/9/12 calls. The gate is `hv_vm_create(HV_VM_ACCEL_APIC)`, which `tVmCreate` still refused.
+
+This slice adds the host-testable register model (`kext/Source/ApicState.hpp`, `tests/apic_test.cpp`):
+LAPIC TPR/PPR/IRR/ISR arbitration, I/O APIC redirection and 8259A state, with layouts byte-for-byte
+matching `hv_apic_state`, `hv_ioapic_state` and `hv_atpic_state` (verified against the macOS 15 SDK).
+
+`tVmCreate` now accepts `HV_VM_ACCEL_APIC` only with boot-arg `amdhv_apic=1` (default 0), and records
+the choice on the VM. No APIC sub-op handler is wired yet, so a client that opts in will still get
+`HV_UNSUPPORTED` from those calls. The next slice uses the opt-in build to capture each sub-op's
+argument block, then connects the model to the traps. This is intentionally not advertised as
+support: the installed kext is still the Phase 1 build, and no live APIC result exists yet.
 
 ---
 
