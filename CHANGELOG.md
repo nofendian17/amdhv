@@ -5,6 +5,23 @@ semantic versioning. The `v*` git tag is the release version: `kext/Makefile` st
 built `Info.plist`. The value committed in `kext/Info.plist` is only a fallback for source archives
 made with `git archive`, which have no tag metadata.
 
+## [0.3.1] — 2026-11-23
+
+### Changed
+- Kext sources are grouped by responsibility and `Vm.cpp` is split into vCPU, run-loop and
+  shared-state modules. The tools share one naming style and document every function.
+- The `v*` git tag is now the release version; `kext/Makefile` stamps it into the built
+  `Info.plist`. Releases include `AMDHV-<version>-macos-x86_64.zip` so OCAT can find and unzip the
+  kext for update checks.
+- CI adds clang static analysis, plist validation and downloadable artifacts.
+
+### Fixed
+- The public ring header no longer divides by zero when initialised with size 0; added a host test.
+
+### Documentation
+- Added ADRs for the source layout and host-testing strategy, documented the OCAT setup, and
+  corrected stale version and merge-status claims.
+
 ## [0.3.0] — 2026-11-23
 
 ### Added
