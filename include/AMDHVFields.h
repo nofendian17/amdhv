@@ -1,8 +1,8 @@
 /*
  * AMDHVFields.h - which VMCS encodings the kernel accepts and which of them it will not let a client write.
  *
- * This mirrors the kext's vmcsRead/vmcsWrite rules (kext/Source/Vm.cpp) for tools and tests: it uses the same
- * generated field list as the kext (kext/Source/VmcsFields.def); tests/vmcs_state_test.cpp checks the accepted
+ * This mirrors the kext's vmcsRead/vmcsWrite rules (kext/Source/core/Vm.cpp) for tools and tests: it uses the same
+ * generated field list as the kext (kext/Source/vmcs/VmcsFields.def); tests/vmcs_state_test.cpp checks the accepted
  * and refused encodings against the kext's own tables, so they cannot drift apart unnoticed.
  */
 #ifndef AMDHV_FIELDS_H
@@ -14,10 +14,17 @@ enum { AMDHV_FIELD_OK = 0, AMDHV_FIELD_INVALID = 1, AMDHV_FIELD_READ_ONLY = 2, A
 
 static const uint32_t kAmdhvVmcsEncodings[] = {
 #define F(name, enc) enc,
-#include "../kext/Source/VmcsFields.def"
+#include "../kext/Source/vmcs/VmcsFields.def"
 #undef F
 };
 
+/**
+ * @brief Check whether a VMCS encoding is in the generated field list.
+ *
+ * @param enc VMCS field encoding.
+ *
+ * @return The int result.
+ */
 static inline int amdhv_vmcs_field_known(uint32_t enc)
 {
     unsigned lo = 0, hi = (unsigned)(sizeof(kAmdhvVmcsEncodings) / sizeof(kAmdhvVmcsEncodings[0]));
@@ -33,14 +40,14 @@ static inline int amdhv_vmcs_field_known(uint32_t enc)
     return 0;
 }
 
-/* Fields of our own for state Intel's VMCS does not have (VmxMap.hpp): CR2, DR6, TPR, DR0-DR3. */
+/** Fields of our own for state Intel's VMCS does not have (VmxMap.hpp): CR2, DR6, TPR, DR0-DR3. */
 static inline int amdhv_vmcs_field_ext(uint32_t enc)
 {
     return enc == 0xF000 || enc == 0xF002 || enc == 0xF004 || enc == 0xF010 || enc == 0xF012 || enc == 0xF014 ||
            enc == 0xF016;
 }
 
-/* The exit information fields, written by the kext on every exit. */
+/** The exit information fields, written by the kext on every exit. */
 static inline int amdhv_vmcs_field_read_only(uint32_t enc)
 {
     switch (enc) {
@@ -52,7 +59,7 @@ static inline int amdhv_vmcs_field_read_only(uint32_t enc)
     }
 }
 
-/* What a write of `value` to `enc` would do: AMDHV_FIELD_OK, or the reason it is refused. */
+/** What a write of `value` to `enc` would do: AMDHV_FIELD_OK, or the reason it is refused. */
 static inline int amdhv_vmcs_write_status(uint32_t enc, uint64_t value)
 {
     if (!amdhv_vmcs_field_ext(enc) && !amdhv_vmcs_field_known(enc))
@@ -65,7 +72,7 @@ static inline int amdhv_vmcs_write_status(uint32_t enc, uint64_t value)
     return AMDHV_FIELD_OK;
 }
 
-/* Can the kernel read `enc`? */
+/** Can the kernel read `enc`? */
 static inline int amdhv_vmcs_read_status(uint32_t enc)
 {
     return amdhv_vmcs_field_ext(enc) || amdhv_vmcs_field_known(enc) ? AMDHV_FIELD_OK : AMDHV_FIELD_INVALID;
