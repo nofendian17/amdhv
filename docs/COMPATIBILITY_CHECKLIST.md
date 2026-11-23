@@ -52,6 +52,44 @@ CPU, `amd-info selftest` passes, and `enableFailures` stays 0.
 
 ## 2. SVM core (AMD APM Vol. 2, Chapter 15 and Appendix B)
 
+### 2.0 What "fully implemented" means here
+
+The two source documents cover very different scopes, and neither maps 1:1 onto the API AMDHV
+has to serve. The audit against APM Vol. 2 rev. 3.40 (Ch. 15 and App. B) and the macOS 15.8
+Hypervisor.framework headers gives three separate verdicts:
+
+| Scope | Verdict | Evidence |
+| --- | --- | --- |
+| SVM mechanisms needed to run the HVF clients listed in section 4 | **Yes**, with the caveats in 2.1 | VMRUN/VMSAVE/VMLOAD and GIF discipline (`SvmRun.S`), intercepts, NPT, event injection, ASID/TLB and clean-bit policy (`Vm.cpp`, `VmcsState.hpp`), all exercised by `hvf-smoke`, VZ and `hvf-probe` with `vmInvalidExits = 0` |
+| Every feature described by APM Vol. 2 Ch. 15 / App. B | **No** | The accelerator and isolation features in the table below have no CPUID probe, no enabling VMCB control write and no run path; several cannot be reached from Hypervisor.framework at all |
+| Public x86 Hypervisor.framework surface | **Partial** | 32 trap slots: 22 real handlers, 10 logging stubs that answer `HV_UNSUPPORTED`. The in-kernel APIC, IOAPIC, LAPIC, MSI and PIO-notifier families are refused; the rest of the SDK surface is either a shared-page helper (no trap) or has no handler/probe result and is not claimed |
+
+The older 33047 manual linked in the original goal is the 2005 *Secure Virtual Machine
+Architecture Reference Manual*: its equivalent material is Chapter 2 and Appendix C, not
+Chapter 15 and Appendix B, and it has no clean bits, pause filter, nRIP or AVIC fields. The
+VMCB layout in `VMCB.hpp` follows the newer Appendix B (sources at the end of this page).
+
+Features from current Chapter 15 that AMDHV does **not** implement:
+
+| APM section | Feature | Status | Why / evidence |
+| --- | --- | --- | --- |
+| 15.21 | NMI virtualization (`V_NMI`, `V_NMI_MASK`, `V_NMI_ENABLE`) | **No** | No CPUID feature bit or VMCB `intCtl` write; physical NMI exits are handed to the client |
+| 15.22, 15.32 | SMM support, SMM key / SMM-Lock | **No** | `V3_SMI` is intercepted, but there is no in-kernel SMM state machine and no HVF API for one |
+| 15.23, 15.38 | LBR virtualization, instruction-based sampling | **No** | `AMDHV_SVM_FEAT_LBRV` is reported but unused; `VMCB.hpp` reserves the LBR stack fields. IBS is not probed |
+| 15.24 | External access protection / DEV | **n/a** | HVF has no IOMMU or device-exclusion-vector surface; devices live in the client |
+| 15.25 | GMET, supervisor shadow stacks, read-only guest page tables, INVLPGB/TLBSYNC, vector 5 intercepts | **No** | No CPUID probe, no `nestedCtl` bit, no `interceptVec5` write; the NPT and TLB policy use only what 2.1 lists |
+| 15.27, 15.28, 15.31 | SKINIT secure startup, #SX, SVM key | **No** | `V4_SKINIT` is intercepted and reported to the client; no secure loader, TPM or key management exists |
+| 15.29 | AVIC and x2AVIC | **No** | `AMDHV_SVM_FEAT_AVIC` is reported but unused; VMCB 0x098/0x0E0/0x0F0/0x0F8 stay zero. HVF refuses `HV_VM_ACCEL_APIC` |
+| 15.30 | TSC ratio MSR (`TscRateMsr`) | **No** | Covered by the `TSCRATE` row in 2.2; guest TSC uses `VMCB.tscOffset` only |
+| 15.33 | Nested virtualization (vVMSAVE/VMLOAD, VGIF) | **No** | Covered by the `VVMSAVE`/`VGIF` rows in 2.2 |
+| 15.34–15.36 | SEV, SEV-ES, SEV-SNP (VMSA, GHCB, RMP, VMPL, VMGEXIT) | **No** | No CPUID Fn8000_001F probe, no key management, no encrypted VMCB; no Apple API exposes it |
+| 15.37 | `SPEC_CTRL` virtualization | **No** | The Intel `IA32_SPEC_CTRL`/`IA32_PRED_CMD` MSRs are only emulated as unsupported (`MsrMap.hpp`); the AMD VMCB save field at 0x2E0 is left reserved |
+| 15.15/15.16 | Clean bits and TLB control | **Partial** | See 2.1: clean bits only when CPUID reports them, `TLB_CONTROL` uses 0x01/0x03, not the 0x07 non-global flush |
+
+These are gaps against the *specification*, not against the clients in section 4: none of them
+is reachable through the calls VZ, QEMU HVF, VirtualBox or the Android emulator make on this
+host. Section 5 keeps them out of the P0–P2 roadmap for that reason.
+
 ### 2.1 VMCB and intercepts
 
 | Item | Status | Where / notes |
@@ -74,6 +112,8 @@ CPU, `amd-info selftest` passes, and `enableFailures` stays 0.
 | NPT execute-only pages | **No** | Not advertised |
 | NPT accessed/dirty bits | **No** | Not advertised |
 | NPF exit information | **Yes** | `exitInfo1`/`exitInfo2` and the permission lookup handed to the client; the GPA is used only when `EXITINFO1` bit 32 (DecodeAssists) says `EXITINFO2` holds one |
+| DecodeAssists (APM 15.8) | **Partial** | Used for the two exits the client needs: CR/DR `EXITINFO1` bit 63 names the GPR and NPF bit 32 marks `EXITINFO2` valid. The INTn and INVLPG/INVLPGA assists are not used; those intercepts stay off unless the client asks for them and are reported from the raw exit fields |
+| TLB control value 0x07 (non-global flush) | **No** | `TlbPolicy.hpp` emits 0x01 (`TLB_FLUSH_ALL`) or 0x03 (`FLUSH_BY_ASID`) only; non-global flushes are not needed with a per-vCPU ASID |
 | Guest state save/restore | **Yes** | `SvmRun.S`: `VMSAVE` host → `VMLOAD` guest → `VMRUN` → `VMSAVE` guest → `VMLOAD` host |
 | Guest `EFER.SVME` / `EFER.LMA` | **Yes** | `resetLocked()` and `applyControls()` |
 | Guest PAT | **Yes** | VMCB `gPat` |
@@ -112,6 +152,13 @@ them on. They are candidates for the roadmap, not current capabilities. (`VMCB_C
 The front end registers the same trap tables AppleHV uses (`hv_set_traps`, `hv_set_callbacks`,
 task/thread targets). Indices are the framework's, not ours. A **stub** is logged and answers
 `HV_UNSUPPORTED` in mode 1; mode 2 answers success for debugging only.
+
+The macOS 15.8 x86 SDK declares 78 `hv_return_t` functions plus `hv_tsc_clock`. They do not map
+1:1 onto the 32 trap slots: register/MSR/VMCS/F-state access and the exec/idle/exit-info queries
+read or write the shared pages, so many calls need no trap at all. The slots below split into
+**22 real handlers** (task 0–7 and 12–13, thread 0–7 and 9–12) and **10 stubs** (task 8–11 and
+14–15, thread 8 and 13–15). The tables record trap-level coverage; section 3.4 records SDK
+functions that are neither handled nor probed.
 
 ### 3.1 Task traps
 
@@ -163,6 +210,25 @@ task/thread targets). Indices are the framework's, not ours. A **stub** is logge
 | VMCS shadow and capability words | **Yes** | `VmcsState.hpp` / `VmcsCaps.hpp`; words derive from implemented controls |
 | TPR shadow switch | **Yes** | Boot-arg `amdhv_tpr_shadow=0` or `amd-info hv tpr 0` |
 | Entitlement check | **No** | Native mode: any local process can create a VM (documented limit) |
+
+### 3.4 SDK calls with no kext handler and no probe result
+
+These names appear in the installed x86 SDK but in no kext source path and in no `hvf-probe`
+line. They are **unverified**, not claimed as working. Most belong to the in-kernel APIC family
+that `hv_vm_create(HV_VM_ACCEL_APIC)` already refuses, or to VMX-only state that does not exist on
+an SVM core; they are listed so the API matrix cannot be read as "all 78 calls work".
+
+| Group | Functions | Status |
+| --- | --- | --- |
+| Capability / clock helpers | `hv_capability`, `hv_tsc_clock` | **Unverified** (no probe; the clock helper may be entirely userspace) |
+| TSC offset | `hv_vcpu_set_tsc_relative` | **Unverified** (`hv_vm_sync_tsc` is the exercised path) |
+| Shadow VMCS / MSR info | `hv_vmx_get_msr_info`, `hv_vmx_vcpu_get_cap_write_vmcs`, `hv_vmx_vcpu_read_shadow_vmcs`, `hv_vmx_vcpu_write_shadow_vmcs`, `hv_vmx_vcpu_set_shadow_access`, `hv_vmx_vcpu_set_apic_address_space` | **Unverified** (no shadow VMCS in `VmcsState.hpp`) |
+| APIC state / exit helpers | `hv_vm_atpic_*`, `hv_vm_ioapic_get_state/put_state/pulse_irq`, `hv_vm_send_ioapic_intr`, `hv_vm_set_apic_bus_freq`, `hv_vcpu_apic_ctrl/get_state/put_state/trigger_lvt/lsc_*`, `hv_vcpu_exit_init_ap`, `hv_vcpu_exit_startup_ap`, `hv_vcpu_exit_ioapic_eoi`, `hv_vcpu_exit_apic_access_read`, `hv_vcpu_exit_inject_excp` | **No**, same family as the refused in-kernel APIC and the task-10/thread-13 stubs |
+
+`hv_vcpu_flush` and `hv_vcpu_write_fpstate` are also absent from the kext by name: Apple marks
+the former deprecated and always unsupported, and the latter writes the shared FP area that the
+next run applies (`Frontend.cpp` reads flag `0x80` and calls `setFpu()` at lines 781–802); the read
+path, `fpuToPage`, has a handler and is probed.
 
 ---
 
@@ -478,8 +544,15 @@ is not a demonstrated cause of either panic.
 - Apple, *Hypervisor.framework*: <https://developer.apple.com/documentation/hypervisor>
 - Apple, *Virtualization*: <https://developer.apple.com/documentation/virtualization>
 - xnu public kext interface: `osfmk/kern/hv_support_kext.h`
-- AMD, *AMD64 Architecture Programmer's Manual, Volume 2: System Programming* (33047),
-  Chapter 15 (SVM) and Appendix B (VMCB layout):
+- AMD, *AMD64 Architecture Programmer's Manual, Volume 2: System Programming*, publication
+  24593, Chapter 15 (SVM) and Appendix B (VMCB layout). The VMCB offsets in `VMCB.hpp`
+  (clean bits 0xC0, nRIP 0xC8, instruction bytes 0xD0, AVIC pointers from 0xE0) follow this
+  layout (rev. 3.40 checked for this audit):
+  <http://kib.kiev.ua/x86docs/AMD/AMD64/24593_APM_v2-r3.40.pdf>
+- AMD, *Secure Virtual Machine Architecture Reference Manual*, publication 33047,
+  Chapter 2 (SVM) and Appendix C (VMCB layout). This is the older manual linked from the
+  original goal; it predates VMCB clean bits, pause filtering, NRIPS and AVIC, so its
+  chapter/appendix numbers are **not** the ones used in section 2:
   <https://www.0x04.net/doc/amd/33047.pdf>
 - applevisor (Rust bindings that document the same API surface):
   <https://docs.rs/applevisor/latest/applevisor/>
