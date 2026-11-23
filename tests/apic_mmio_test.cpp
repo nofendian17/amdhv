@@ -29,6 +29,17 @@ void testRead()
     CHECK(op.length == 6);
 }
 
+void testPrefix()
+{
+    /* 66 8B 05 80 00 E0 FE = MOV EAX, [0xFEE00080] in 16-bit real mode. */
+    const uint8_t code[] = { 0x66, 0x8B, 0x05, 0x80, 0x00, 0xE0, 0xFE };
+    const amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(code, sizeof(code));
+    CHECK(op.valid);
+    CHECK(!op.isWrite);
+    CHECK(op.disp == 0xFEE00080u);
+    CHECK(op.length == 7);
+}
+
 void testWrite()
 {
     /* 89 0D 00 03 FE FE = MOV [0xFEE00300], ECX (ICR low). */
@@ -63,6 +74,7 @@ void testOffset()
 int main()
 {
     testRead();
+    testPrefix();
     testWrite();
     testRejectsEverythingElse();
     testOffset();

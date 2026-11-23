@@ -34,7 +34,15 @@ inline MmioOp decodeMmio(const uint8_t *code, size_t n)
     MmioOp op = { false, false, 0, 0, 0 };
     if (n < 6)
         return op;
-    const uint8_t opcode = code[0], modrm = code[1];
+    size_t i = 0;
+    if (code[i] == 0x66) {                    /* operand-size prefix: real-mode guests need it for EAX */
+        if (n < 7)
+            return op;
+        i++;
+    }
+    if (n < i + 6)
+        return op;
+    const uint8_t opcode = code[i], modrm = code[i + 1];
     if (opcode != 0x8B && opcode != 0x89)
         return op;
     if ((modrm & 0xC7) != 0x05)            /* mod=00, rm=101: disp32 follows */
@@ -42,9 +50,9 @@ inline MmioOp decodeMmio(const uint8_t *code, size_t n)
     op.valid   = true;
     op.isWrite = opcode == 0x89;
     op.reg     = (modrm >> 3) & 7;
-    op.disp    = (uint32_t)code[2] | ((uint32_t)code[3] << 8) |
-                 ((uint32_t)code[4] << 16) | ((uint32_t)code[5] << 24);
-    op.length  = 6;
+    op.disp    = (uint32_t)code[i + 2] | ((uint32_t)code[i + 3] << 8) |
+                 ((uint32_t)code[i + 4] << 16) | ((uint32_t)code[i + 5] << 24);
+    op.length  = (unsigned)i + 6;
     return op;
 }
 

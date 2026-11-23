@@ -1333,7 +1333,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             const uint64_t fault = v->control.exitInfo2;
             const uint32_t off = amdhv::apic::mmioOffset(fault, 0xFEE00000ull);
             if (off != 0xFFFFFFFFu) {
-                uint8_t insn[6] = {0};
+                uint8_t insn[7] = {0};
                 if (fShared->guestBytes(fSpace, v->save.rip, insn, sizeof(insn))) {
                     const amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(insn, sizeof(insn));
                     if (op.valid && op.disp == fault) {

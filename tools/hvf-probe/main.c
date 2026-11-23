@@ -686,9 +686,9 @@ static void probeApicMmio(void)
     uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (ram == MAP_FAILED) { perror("mmap"); return; }
     memset(ram, 0, RAM_SIZE);
-    ram[0x1000] = 0x8B; ram[0x1001] = 0x05;
-    ram[0x1002] = 0x80; ram[0x1003] = 0x00; ram[0x1004] = 0xE0; ram[0x1005] = 0xFE;
-    ram[0x1006] = 0xF4;                       /* HLT after the emulated load */
+    ram[0x1000] = 0x66; ram[0x1001] = 0x8B; ram[0x1002] = 0x05;
+    ram[0x1003] = 0x80; ram[0x1004] = 0x00; ram[0x1005] = 0xE0; ram[0x1006] = 0xFE;
+    ram[0x1007] = 0xF4;                       /* HLT after the emulated load */
 
     hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
     line("hv_vm_create(HV_VM_ACCEL_APIC)", r);
@@ -701,18 +701,22 @@ static void probeApicMmio(void)
     setupControls(v);
     setupRealMode(v, 0x1000);
 
-    hv_apic_state_ext_t apic = { 0 };
-    line("apic get_state (setup)", hv_vcpu_apic_get_state(v, &apic));
-    apic.state.tpr = 0x55;
-    line("apic put_state (setup)", hv_vcpu_apic_put_state(v, &apic));
+    /* The front end mirrors HV_X86_TPR into the LAPIC model on every run, so this is enough to give
+     * the emulated MMIO read a non-zero value. */
+    line("write TPR", hv_vcpu_write_register(v, HV_X86_TPR, 0x55));
 
+    uint64_t ripBefore = 0;
+    hv_vcpu_read_register(v, HV_X86_RIP, &ripBefore);
+    printf("  %-52s %#llx\n", "  (RIP before run)", (unsigned long long)ripBefore);
     r = hv_vcpu_run(v);
+    for (int i = 0; i < 1000 && r == HV_SUCCESS && (rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF) == 1; i++)
+        r = hv_vcpu_run(v);
     uint64_t rip = 0, rax = 0;
     hv_vmx_vcpu_read_vmcs(v, VMCS_GUEST_RIP, &rip);
     hv_vcpu_read_register(v, HV_X86_RAX, &rax);
     printf("  %-52s %s, exit %" PRIu64 ", RIP %#" PRIx64 ", EAX %#" PRIx64 " (%s)\n",
            "guest MOV EAX,[LAPIC TPR]", hvName(r), rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF,
-           rip, rax, rip == 0x1006 && rax == 0x55 ? "emulated" : "client NPF");
+           rip, rax, rip == 0x1007 && rax == 0x55 ? "emulated" : "client NPF");
     hv_vcpu_destroy(v);
     hv_vm_destroy();
     munmap(ram, RAM_SIZE);
