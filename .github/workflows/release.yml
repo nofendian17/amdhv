@@ -1,10 +1,12 @@
 name: Release
 
 # Builds AMDHV.kext and the tools on a GitHub macOS runner, packages them with
-# the sources into one archive, and attaches it to a GitHub Release.
+# the sources, and attaches three archives to a GitHub Release. One is a zip
+# named with "AMDHV" because OCAT only downloads assets whose name contains the
+# kext name and then unzips them.
 #
 #   Trigger:  push a tag (v0.1.0, ...) or run it by hand from the Actions tab.
-#   The tag should match the version in kext/Info.plist.
+#   The v* tag is the release version; kext/Makefile stamps it into the built Info.plist.
 #   Release notes: the install paragraph is static; the changelog below it is
 #   built from the commit subjects since the previous v* tag, grouped by type.
 #   Write commit subjects for the release, because they are user-visible.
@@ -26,6 +28,13 @@ jobs:
           # Full history and tags: the release notes list the commits since the previous tag.
           fetch-depth: 0
 
+      - name: Verify tagged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          grep -qF "## [$V]" CHANGELOG.md || { echo "CHANGELOG.md has no [$V] section"; exit 1; }
+          echo "Release version $V comes from tag $GITHUB_REF_NAME"
+
       - name: Build kext and tools
         run: make kext tools
 
@@ -46,7 +55,10 @@ jobs:
           cp build/amd-info build/hvf-smoke "$STAGE/build/"
           tar -czf "amdhv-${V}-macos-x86_64.tar.gz" "$STAGE"
           git archive --format=tar.gz -o "amdhv-${V}-source.tar.gz" HEAD
-          ls -la amdhv-${V}-*.tar.gz
+          # OCAT matches asset names case-sensitively against "AMDHV" and runs
+          # `unzip`, so ship a zip with AMDHV.kext at the archive root.
+          (cd "$STAGE/build" && zip -qr "../../AMDHV-${V}-macos-x86_64.zip" AMDHV.kext)
+          ls -la amdhv-${V}-*.tar.gz AMDHV-${V}-macos-x86_64.zip
 
       - name: Build release notes
         if: startsWith(github.ref, 'refs/tags/v')
@@ -105,6 +117,7 @@ jobs:
           gh release create "$TAG" \
             "amdhv-${V}-macos-x86_64.tar.gz" \
             "amdhv-${V}-source.tar.gz" \
+            "AMDHV-${V}-macos-x86_64.zip" \
             --verify-tag \
             --title "AMDHV ${TAG}" \
             --notes-file release-notes.md

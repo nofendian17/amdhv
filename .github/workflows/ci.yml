@@ -1,20 +1,43 @@
 name: CI
 
-# Every push and pull request runs the host tests and builds the kext + tools,
-# so a refactor cannot silently break either half of the project.
+# Gates modelled on acidanthera/AppleALC: build, static analysis and plist
+# validation on every push/PR, with artifacts available for manual testing.
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-test:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Host unit tests
         run: make test
 
+      - name: Validate plists
+        run: |
+          plutil -lint kext/Info.plist
+          # OpenCore tooling rejects real numbers in plists (cf. AppleALC check.yml).
+          if find . -name '*.plist' -exec grep -l '<real>' {} + | grep .; then
+            echo "Found a <real> key in a plist"
+            exit 1
+          fi
+
+      - name: Static analysis
+        run: make -C kext analyze
+
       - name: Build kext and tools
         run: make kext tools
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: amdhv-${{ github.sha }}
+          path: |
+            build/AMDHV.kext
+            build/amd-info
+            build/hvf-smoke
+            build/hvf-probe

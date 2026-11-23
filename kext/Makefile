@@ -6,6 +6,13 @@ OUT     := ../build
 KEXT    := $(OUT)/AMDHV.kext
 OBJDIR  := $(OUT)/kext-obj
 
+# The v* git tag is the release version. Source archives made with `git archive`
+# have no .git, so fall back to the version committed in Info.plist there.
+GIT_VERSION  := $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//')
+PLIST_VERSION := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist 2>/dev/null)
+VERSION      ?= $(if $(GIT_VERSION),$(GIT_VERSION),$(PLIST_VERSION))
+PLIST        := $(KEXT)/Contents/Info.plist
+
 # Sources are grouped by responsibility under Source/. Find them recursively.
 CXXSRC  := $(shell find Source -name '*.cpp' | sort)
 CSRC    := $(shell find Source -name '*.c' | sort)
@@ -37,7 +44,12 @@ CFLAGS   := $(COMMON) -fno-builtin -MMD -MP
 # Header dependencies: editing a .hpp/.h rebuilds every object that includes it.
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all clean
+# Clang static analysis, like the analyze-clang job in AppleALC's CI. The .d
+# flags are dropped: --analyze does not produce objects or dependency files.
+ANALYZE_CXX := $(filter-out -MMD -MP,$(CXXFLAGS))
+ANALYZE_C   := $(filter-out -MMD -MP,$(CFLAGS))
+
+.PHONY: all clean analyze
 
 all: $(KEXT)
 
@@ -56,14 +68,29 @@ $(OBJDIR)/%.o: Source/%.S
 $(KEXT): $(OBJS) Info.plist
 	rm -rf $(KEXT)
 	mkdir -p $(KEXT)/Contents/MacOS
-	cp Info.plist $(KEXT)/Contents/Info.plist
+	cp Info.plist $(PLIST)
+	/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString $(VERSION)' $(PLIST)
+	/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion $(VERSION)' $(PLIST)
 	xcrun clang++ -arch x86_64 -isysroot $(SDK) -mkernel -nostdlib -fapple-kext \
 		-Xlinker -kext -L$(SDK)/usr/lib \
 		-o $(KEXT)/Contents/MacOS/AMDHV $(OBJS) \
 		-lkmodc++ -lkmod -lcc_kext
 	../scripts/check-kext-symbols.sh $(KEXT)
-	@echo "Built $(KEXT)"
+	@echo "Built $(KEXT), version $(VERSION)"
 	@echo "OpenCore loads it unsigned via Kernel -> Add"
+
+analyze:
+	@mkdir -p $(OUT)/analyze
+	@set -e; for f in $(CXXSRC) $(CSRC); do \
+	  case "$$f" in \
+	    *.cpp) xcrun clang++ --analyze -Xanalyzer -analyzer-output=text $(ANALYZE_CXX) "$$f" ;; \
+	    *.c)   xcrun clang --analyze -Xanalyzer -analyzer-output=text $(ANALYZE_C) "$$f" ;; \
+	  esac; \
+	done > $(OUT)/analyze/analyzer.log 2>&1 || { cat $(OUT)/analyze/analyzer.log; exit 1; }
+	@if grep -qE 'warning:|error:' $(OUT)/analyze/analyzer.log; then \
+	  cat $(OUT)/analyze/analyzer.log; exit 1; \
+	fi
+	@echo "static analysis clean"
 
 clean:
 	rm -rf $(KEXT) $(OBJDIR)

@@ -48,6 +48,11 @@ static inline void amdhv_ring_init(AMDHVRing *r, char *buf, uint32_t size)
  */
 static inline void amdhv_ring_write(AMDHVRing *r, const char *data, uint32_t len)
 {
+    /* A zero-size ring has no buffer to modulo into. The kext always uses a
+     * non-zero constant, but the header is public and tested on its own. */
+    if (r->size == 0 || !r->buf)
+        return;
+
     uint64_t newHead = r->head + len;
 
     /* Longer than the ring: only the tail survives. */
@@ -74,6 +79,12 @@ static inline void amdhv_ring_write(AMDHVRing *r, const char *data, uint32_t len
 static inline uint32_t amdhv_ring_read(const AMDHVRing *r, uint64_t cursor, char *out, uint32_t outMax,
                                      uint64_t *nextCursor, uint64_t *dropped)
 {
+    if (r->size == 0 || !r->buf) {
+        *dropped = 0;
+        *nextCursor = cursor;
+        return 0;
+    }
+
     uint64_t oldest = r->head > r->size ? r->head - r->size : 0;
 
     *dropped = 0;

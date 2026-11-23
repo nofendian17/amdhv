@@ -1,9 +1,10 @@
 # Top-level build. Run on the Hackintosh (needs Xcode command line tools).
 #
-#   make test     host-side unit tests, works on any OS with a C compiler
-#   make tools    build/amd-info, build/hvf-smoke, build/hvf-probe
-#   make kext     build/AMDHV.kext   (see kext/Makefile)
-#   make all      tools + kext
+#   make test        host-side unit tests, works on any OS with a C compiler
+#   make coverage    gcov-instrumented tests, data under build/cov/gcov
+#   make tools       build all three tools (or one: make hvf-probe)
+#   make kext        build/AMDHV.kext   (see kext/Makefile)
+#   make all         tools + kext
 #   make clean
 
 BUILD := build
