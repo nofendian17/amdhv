@@ -211,24 +211,26 @@ functions that are neither handled nor probed.
 | TPR shadow switch | **Yes** | Boot-arg `amdhv_tpr_shadow=0` or `amd-info hv tpr 0` |
 | Entitlement check | **No** | Native mode: any local process can create a VM (documented limit) |
 
-### 3.4 SDK calls with no kext handler and no probe result
+### 3.4 Every SDK call now has a probe result
 
-These names appear in the installed x86 SDK but in no kext source path and in no `hvf-probe`
-line. They are **unverified**, not claimed as working. Most belong to the in-kernel APIC family
-that `hv_vm_create(HV_VM_ACCEL_APIC)` already refuses, or to VMX-only state that does not exist on
-an SVM core; they are listed so the API matrix cannot be read as "all 78 calls work".
+`hvf-probe --matrix` calls each of the 79 exported x86 functions once with benign arguments in a
+fresh task. On this host (0.2.0, Ryzen 5 3600, macOS 15.8.3) it prints `79 of 79` observed, so
+there is no longer an "unverified" bucket. The line-by-line output is in
+[CAPABILITIES.md](CAPABILITIES.md#full-public-api-matrix-measured-on-020).
 
-| Group | Functions | Status |
-| --- | --- | --- |
-| Capability / clock helpers | `hv_capability`, `hv_tsc_clock` | **Unverified** (no probe; the clock helper may be entirely userspace) |
-| TSC offset | `hv_vcpu_set_tsc_relative` | **Unverified** (`hv_vm_sync_tsc` is the exercised path) |
-| Shadow VMCS / MSR info | `hv_vmx_get_msr_info`, `hv_vmx_vcpu_get_cap_write_vmcs`, `hv_vmx_vcpu_read_shadow_vmcs`, `hv_vmx_vcpu_write_shadow_vmcs`, `hv_vmx_vcpu_set_shadow_access`, `hv_vmx_vcpu_set_apic_address_space` | **Unverified** (no shadow VMCS in `VmcsState.hpp`) |
-| APIC state / exit helpers | `hv_vm_atpic_*`, `hv_vm_ioapic_get_state/put_state/pulse_irq`, `hv_vm_send_ioapic_intr`, `hv_vm_set_apic_bus_freq`, `hv_vcpu_apic_ctrl/get_state/put_state/trigger_lvt/lsc_*`, `hv_vcpu_exit_init_ap`, `hv_vcpu_exit_startup_ap`, `hv_vcpu_exit_ioapic_eoi`, `hv_vcpu_exit_apic_access_read`, `hv_vcpu_exit_inject_excp` | **No**, same family as the refused in-kernel APIC and the task-10/thread-13 stubs |
+| Group | Functions | Measured answer | Reading |
+| --- | --- | --- | --- |
+| Capability / clock | `hv_capability`, `hv_tsc_clock` | `ok` (`VCPUMAX=64`), monotonic value | real, framework-side |
+| TSC offset | `hv_vcpu_set_tsc_relative` | `ok` but the VMCS TSC-offset read-back does not change | no-op on the AMD core; `hv_vm_sync_tsc` is the applied path |
+| Shadow VMCS | `hv_vmx_vcpu_read/write_shadow_vmcs` | `ok`, value round-trips | client-side store only; SVM has no shadow VMCS for the core to consume |
+| Shadow access | `hv_vmx_vcpu_set_shadow_access` | `HV_UNSUPPORTED` | no shadow VMCS to grant access to |
+| MSR info / cap-write / APIC address space | `hv_vmx_get_msr_info`, `hv_vmx_vcpu_get_cap_write_vmcs`, `hv_vmx_vcpu_set_apic_address_space` | `ok` (`0` for `IA32_ARCH_CAPABILITIES`), `ok` (thread trap 12), `ok` (no-op like `set_apic_address`) | answers correctly, no extra SVM state needed |
+| APIC state / exit helpers | `hv_vm_atpic_*`, `hv_vm_ioapic_get_state/put_state/pulse_irq`, `hv_vm_send_ioapic_intr`, `hv_vm_set_apic_bus_freq`, `hv_vcpu_apic_ctrl/get_state/put_state/trigger_lvt/lsc_*`, `hv_vcpu_exit_init_ap`, `hv_vcpu_exit_startup_ap`, `hv_vcpu_exit_ioapic_eoi`, `hv_vcpu_exit_apic_access_read`, `hv_vcpu_exit_inject_excp` | `HV_UNSUPPORTED` or `HV_ERROR` | same refused in-kernel-APIC family; no change |
 
-`hv_vcpu_flush` and `hv_vcpu_write_fpstate` are also absent from the kext by name: Apple marks
-the former deprecated and always unsupported, and the latter writes the shared FP area that the
-next run applies (`Frontend.cpp` reads flag `0x80` and calls `setFpu()` at lines 781–802); the read
-path, `fpuToPage`, has a handler and is probed.
+`hv_vcpu_flush` is now probed and returns `HV_UNSUPPORTED`, exactly as Apple documents for a
+deprecated API. `hv_vcpu_write_fpstate` returns `ok`: it writes the shared FP area that the next run
+applies (`Frontend.cpp` reads flag `0x80` and calls `setFpu()` at lines 781–802). Neither name needs
+a kext trap of its own.
 
 ---
 

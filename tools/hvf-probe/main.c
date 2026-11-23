@@ -12,10 +12,11 @@
  * Build:  make tools
  * Run:    ./build/hvf-probe            (needs the com.apple.security.hypervisor entitlement)
  *
- * Three probes need a task with no VM of its own and run in a forked child:
+ * Four probes need a task with no VM of its own and run in a forked child:
  *   - hv_vm_create(HV_VM_ACCEL_APIC), which a client that wants the in-kernel APIC passes;
  *   - a second hv_vm_create in the same task, which must answer HV_BUSY;
- *   - the vCPU-count probe, which creates one vCPU per thread (the API binds a vCPU to a thread).
+ *   - the vCPU-count probe, which creates one vCPU per thread (the API binds a vCPU to a thread);
+ *   - the full API matrix, which creates its own VM/vCPU to measure all 79 exported functions.
  */
 #include <Hypervisor/Hypervisor.h>
 #include <errno.h>
@@ -280,6 +281,260 @@ static void probeVcpuCount(void)
     munmap(ram, RAM_SIZE);
 }
 
+/* --------------------------------------------------------------------------
+ * Full public API matrix (--matrix).
+ *
+ * The probes above follow real client flows, but a few exported functions are
+ * never reached that way. This pass calls every function exported by the x86
+ * Hypervisor.framework headers exactly once with benign arguments and prints
+ * the answer, turning "unverified" into a measured result. It runs in a fresh
+ * task so its VM/vCPU cannot disturb the exploratory probes. An error is a
+ * result here, never a test failure.
+ */
+#define API_COUNT 79
+static const char *const kApiNames[API_COUNT] = {
+    "hv_capability", "hv_vm_create", "hv_vm_destroy", "hv_vm_space_create",
+    "hv_vm_space_destroy", "hv_vm_map", "hv_vm_unmap", "hv_vm_protect",
+    "hv_vm_map_space", "hv_vm_unmap_space", "hv_vm_protect_space",
+    "hv_vm_sync_tsc", "hv_vm_add_pio_notifier", "hv_vm_remove_pio_notifier",
+    "hv_vcpu_create", "hv_vcpu_destroy", "hv_vcpu_set_space",
+    "hv_vcpu_read_register", "hv_vcpu_write_register", "hv_vcpu_read_fpstate",
+    "hv_vcpu_write_fpstate", "hv_vcpu_enable_native_msr",
+    "hv_vcpu_enable_managed_msr", "hv_vcpu_set_msr_access", "hv_vcpu_read_msr",
+    "hv_vcpu_write_msr", "hv_vcpu_flush", "hv_vcpu_invalidate_tlb",
+    "hv_vcpu_run", "hv_vcpu_run_until", "hv_vcpu_interrupt",
+    "hv_vcpu_get_exec_time", "hv_vcpu_get_idle_time", "hv_tsc_clock",
+    "hv_vcpu_set_tsc_relative", "hv_vcpu_vmx_status", "hv_vm_lapic_set_intr",
+    "hv_vm_lapic_msi", "hv_vm_ioapic_assert_irq", "hv_vm_ioapic_deassert_irq",
+    "hv_vm_ioapic_pulse_irq", "hv_vm_ioapic_read", "hv_vm_ioapic_write",
+    "hv_vm_ioapic_get_state", "hv_vm_ioapic_put_state", "hv_vm_send_ioapic_intr",
+    "hv_vm_atpic_assert_irq", "hv_vm_atpic_deassert_irq",
+    "hv_vm_atpic_port_read", "hv_vm_atpic_port_write", "hv_vm_atpic_get_state",
+    "hv_vm_atpic_put_state", "hv_vm_set_apic_bus_freq", "hv_vcpu_inject_extint",
+    "hv_vcpu_apic_read", "hv_vcpu_apic_write", "hv_vcpu_apic_get_state",
+    "hv_vcpu_apic_put_state", "hv_vcpu_exit_info", "hv_vcpu_exit_init_ap",
+    "hv_vcpu_exit_startup_ap", "hv_vcpu_exit_ioapic_eoi",
+    "hv_vcpu_exit_apic_access_read", "hv_vcpu_exit_inject_excp",
+    "hv_vcpu_apic_lsc_enter_r32", "hv_vcpu_apic_lsc_enter_imm32",
+    "hv_vcpu_apic_lsc_invalidate", "hv_vcpu_apic_ctrl",
+    "hv_vcpu_apic_trigger_lvt", "hv_vmx_vcpu_read_vmcs",
+    "hv_vmx_vcpu_write_vmcs", "hv_vmx_vcpu_get_cap_write_vmcs",
+    "hv_vmx_vcpu_read_shadow_vmcs", "hv_vmx_vcpu_write_shadow_vmcs",
+    "hv_vmx_vcpu_set_shadow_access", "hv_vmx_read_capability",
+    "hv_vmx_get_msr_info", "hv_vmx_vcpu_set_apic_address",
+    "hv_vmx_vcpu_set_apic_address_space",
+};
+
+static int g_apiSeen[API_COUNT];
+
+static void mx(const char *name, hv_return_t r)
+{
+    for (int i = 0; i < API_COUNT; i++) {
+        if (!strcmp(kApiNames[i], name)) {
+            g_apiSeen[i] = 1;
+            break;
+        }
+    }
+    line(name, r);
+}
+
+static void apiSummary(void)
+{
+    int seen = 0;
+    for (int i = 0; i < API_COUNT; i++) {
+        if (g_apiSeen[i])
+            seen++;
+        else
+            printf("  %-52s NOT PROBED\n", kApiNames[i]);
+    }
+    printf("  %-52s %d of %d\n", "public API functions observed", seen, API_COUNT);
+}
+
+static void probeApiMatrix(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) {
+        perror("mmap");
+        return;
+    }
+    memset(ram, 0, RAM_SIZE);
+    ram[0x1000] = 0xF4;
+    uint8_t *extra = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (extra == MAP_FAILED) {
+        perror("mmap (extra)");
+        munmap(ram, RAM_SIZE);
+        return;
+    }
+    memset(extra, 0, 2 * PAGE);
+
+    printf("Public x86 Hypervisor.framework API matrix (SDK macOS 15)\n");
+    hv_return_t r = hv_vm_create(HV_VM_DEFAULT);
+    mx("hv_vm_create", r);
+    if (r != HV_SUCCESS) {
+        printf("  no VM: the vCPU functions below cannot be probed\n");
+        apiSummary();
+        hv_vm_destroy();
+        munmap(extra, 2 * PAGE);
+        munmap(ram, RAM_SIZE);
+        return;
+    }
+
+    hv_vm_space_t space = 0;
+    mx("hv_vm_space_create", hv_vm_space_create(&space));
+    if (space == 0)
+        space = 1;
+
+    uint64_t value = 0;
+    mx("hv_capability", hv_capability(HV_CAP_VCPUMAX, &value));
+    printf("  %-52s VCPUMAX=%" PRIu64 "\n", "  (hv_capability value)", value);
+    mx("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    mx("hv_vm_protect", hv_vm_protect(0, PAGE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    mx("hv_vm_map_space", hv_vm_map_space(space, extra, 0x200000, PAGE, HV_MEMORY_READ | HV_MEMORY_WRITE));
+    mx("hv_vm_protect_space", hv_vm_protect_space(space, 0x200000, PAGE, HV_MEMORY_READ));
+    mx("hv_vm_unmap_space", hv_vm_unmap_space(space, 0x200000, PAGE));
+    hv_vm_map(extra + PAGE, 0x400000, PAGE, HV_MEMORY_READ | HV_MEMORY_WRITE);    /* setup for hv_vm_unmap */
+    mx("hv_vm_unmap", hv_vm_unmap(0x400000, PAGE));
+    mx("hv_vm_sync_tsc", hv_vm_sync_tsc(1));
+
+    uint64_t clock = hv_tsc_clock();
+    for (int i = 0; i < API_COUNT; i++)
+        if (!strcmp(kApiNames[i], "hv_tsc_clock"))
+            g_apiSeen[i] = 1;
+    printf("  %-52s %" PRIu64 " (uint64_t, not hv_return_t)\n", "hv_tsc_clock", clock);
+
+    mach_port_t port = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS) {
+        mx("hv_vm_add_pio_notifier", hv_vm_add_pio_notifier(0x3F8, 1, 0, port, 0));
+        mx("hv_vm_remove_pio_notifier", hv_vm_remove_pio_notifier(0x3F8, 1, 0, port, 0));
+        mach_port_deallocate(mach_task_self(), port);
+    }
+
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    mx("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) {
+        printf("  no vCPU: the per-vCPU functions below cannot be probed\n");
+        apiSummary();
+        hv_vm_destroy();
+        munmap(extra, 2 * PAGE);
+        munmap(ram, RAM_SIZE);
+        return;
+    }
+
+    setupControls(v);
+    setupRealMode(v, 0x1000);
+    mx("hv_vcpu_set_space", hv_vcpu_set_space(v, space));
+    hv_vm_space_destroy(space);                       /* extra call: expect HV_BUSY while bound */
+    hv_vcpu_set_space(v, HV_VM_SPACE_DEFAULT);        /* extra call: unbind before the next probe */
+    mx("hv_vm_space_destroy", hv_vm_space_destroy(space));
+
+    uint64_t reg = 0;
+    mx("hv_vcpu_read_register", hv_vcpu_read_register(v, HV_X86_RIP, &reg));
+    mx("hv_vcpu_write_register", hv_vcpu_write_register(v, HV_X86_RIP, 0x1000));
+    uint8_t fp[4096];
+    memset(fp, 0, sizeof(fp));
+    mx("hv_vcpu_read_fpstate", hv_vcpu_read_fpstate(v, fp, sizeof(fp)));
+    mx("hv_vcpu_write_fpstate", hv_vcpu_write_fpstate(v, fp, sizeof(fp)));
+    mx("hv_vcpu_enable_native_msr", hv_vcpu_enable_native_msr(v, 0xC0000100, true));
+    mx("hv_vcpu_enable_managed_msr", hv_vcpu_enable_managed_msr(v, 0xC0000100, true));
+    mx("hv_vcpu_set_msr_access", hv_vcpu_set_msr_access(v, 0xC0000100, 0));
+    mx("hv_vcpu_write_msr", hv_vcpu_write_msr(v, 0xC0000082, 0xffffff8000100000ull));
+    mx("hv_vcpu_read_msr", hv_vcpu_read_msr(v, 0xC0000082, &value));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    mx("hv_vcpu_flush", hv_vcpu_flush(v));
+#pragma clang diagnostic pop
+    mx("hv_vcpu_invalidate_tlb", hv_vcpu_invalidate_tlb(v));
+    mx("hv_vcpu_interrupt", hv_vcpu_interrupt(&v, 1));
+    uint64_t off = 0;
+    hv_vmx_vcpu_read_vmcs(v, VMCS_CTRL_TSC_OFFSET, &off);
+    uint64_t offBefore = off;
+    mx("hv_vcpu_set_tsc_relative", hv_vcpu_set_tsc_relative(v, 0x1000));
+    hv_vmx_vcpu_read_vmcs(v, VMCS_CTRL_TSC_OFFSET, &off);
+    printf("  %-52s %s (offset %#" PRIx64 " -> %#" PRIx64 ", delta %#" PRIx64 ")\n",
+           "  (set_tsc_relative effect)", off - offBefore == 0x1000 ? "wired" : "not the requested delta",
+           offBefore, off, off - offBefore);
+
+    setupRealMode(v, 0x1000);
+    mx("hv_vcpu_run", hv_vcpu_run(v));
+    setupRealMode(v, 0x1100);
+    mx("hv_vcpu_run_until", hv_vcpu_run_until(v, mach_absolute_time()));
+
+    uint64_t time = 0;
+    mx("hv_vcpu_get_exec_time", hv_vcpu_get_exec_time(v, &time));
+    mx("hv_vcpu_get_idle_time", hv_vcpu_get_idle_time(v, &time));
+    uint32_t status = 0;
+    mx("hv_vcpu_vmx_status", hv_vcpu_vmx_status(v, &status));
+    mx("hv_vcpu_exit_info", hv_vcpu_exit_info(v, &status));
+
+    mx("hv_vm_lapic_set_intr", hv_vm_lapic_set_intr(v, 0x20, HV_APIC_EDGE_TRIGGER));
+    mx("hv_vm_lapic_msi", hv_vm_lapic_msi(0xFEE00000, 0x4000));
+    mx("hv_vm_ioapic_assert_irq", hv_vm_ioapic_assert_irq(0));
+    mx("hv_vm_ioapic_deassert_irq", hv_vm_ioapic_deassert_irq(0));
+    mx("hv_vm_ioapic_pulse_irq", hv_vm_ioapic_pulse_irq(0));
+    uint32_t data = 0;
+    mx("hv_vm_ioapic_read", hv_vm_ioapic_read(0xFEC00000, &data));
+    mx("hv_vm_ioapic_write", hv_vm_ioapic_write(0xFEC00000, 0));
+    hv_ioapic_state_ext_t ioapic = { 0 };
+    mx("hv_vm_ioapic_get_state", hv_vm_ioapic_get_state(&ioapic));
+    mx("hv_vm_ioapic_put_state", hv_vm_ioapic_put_state(&ioapic));
+    mx("hv_vm_send_ioapic_intr", hv_vm_send_ioapic_intr(0x4000));
+    mx("hv_vm_atpic_assert_irq", hv_vm_atpic_assert_irq(0));
+    mx("hv_vm_atpic_deassert_irq", hv_vm_atpic_deassert_irq(0));
+    uint8_t byte = 0;
+    mx("hv_vm_atpic_port_read", hv_vm_atpic_port_read(0x21, &byte));
+    mx("hv_vm_atpic_port_write", hv_vm_atpic_port_write(0x21, 0));
+    hv_atpic_state_ext_t atpic = { 0 };
+    mx("hv_vm_atpic_get_state", hv_vm_atpic_get_state(&atpic, true));
+    mx("hv_vm_atpic_put_state", hv_vm_atpic_put_state(&atpic, true));
+    mx("hv_vm_set_apic_bus_freq", hv_vm_set_apic_bus_freq(1000000000));
+
+    mx("hv_vcpu_inject_extint", hv_vcpu_inject_extint(v));
+    bool noSideEffect = false;
+    mx("hv_vcpu_apic_read", hv_vcpu_apic_read(v, 0x80, &data));
+    mx("hv_vcpu_apic_write", hv_vcpu_apic_write(v, 0x80, 0, &noSideEffect));
+    hv_apic_state_ext_t apic = { 0 };
+    mx("hv_vcpu_apic_get_state", hv_vcpu_apic_get_state(v, &apic));
+    mx("hv_vcpu_apic_put_state", hv_vcpu_apic_put_state(v, &apic));
+    bool active[1] = { false };
+    uint64_t rip = 0;
+    uint8_t vec = 0;
+    bool valid = false, restart = false;
+    mx("hv_vcpu_exit_init_ap", hv_vcpu_exit_init_ap(v, active, 1));
+    mx("hv_vcpu_exit_startup_ap", hv_vcpu_exit_startup_ap(v, active, 1, &rip));
+    mx("hv_vcpu_exit_ioapic_eoi", hv_vcpu_exit_ioapic_eoi(v, &vec));
+    mx("hv_vcpu_exit_apic_access_read", hv_vcpu_exit_apic_access_read(v, &data));
+    mx("hv_vcpu_exit_inject_excp", hv_vcpu_exit_inject_excp(v, &vec, &valid, &data, &restart));
+    mx("hv_vcpu_apic_lsc_enter_r32", hv_vcpu_apic_lsc_enter_r32(v, true, 0x1000, 1, 8, HV_X86_RAX, NULL, 0));
+    mx("hv_vcpu_apic_lsc_enter_imm32", hv_vcpu_apic_lsc_enter_imm32(v, 0x1000, 1, 8, 0, NULL, 0));
+    mx("hv_vcpu_apic_lsc_invalidate", hv_vcpu_apic_lsc_invalidate(v));
+    mx("hv_vcpu_apic_ctrl", hv_vcpu_apic_ctrl(v, HV_APIC_CTRL_DEFAULT));
+    mx("hv_vcpu_apic_trigger_lvt", hv_vcpu_apic_trigger_lvt(v, HV_APIC_LVT_FLAVOR_TIMER));
+
+    uint64_t allowed0 = 0, allowed1 = 0;
+    mx("hv_vmx_vcpu_read_vmcs", hv_vmx_vcpu_read_vmcs(v, VMCS_GUEST_ES, &value));
+    mx("hv_vmx_vcpu_write_vmcs", hv_vmx_vcpu_write_vmcs(v, VMCS_GUEST_ES, 0));
+    mx("hv_vmx_vcpu_get_cap_write_vmcs", hv_vmx_vcpu_get_cap_write_vmcs(v, VMCS_GUEST_ES, &allowed0, &allowed1));
+    mx("hv_vmx_vcpu_read_shadow_vmcs", hv_vmx_vcpu_read_shadow_vmcs(v, VMCS_GUEST_ES, &value));
+    mx("hv_vmx_vcpu_write_shadow_vmcs", hv_vmx_vcpu_write_shadow_vmcs(v, VMCS_GUEST_ES, 0x1234));
+    uint64_t shadow = 0;
+    hv_return_t sr = hv_vmx_vcpu_read_shadow_vmcs(v, VMCS_GUEST_ES, &shadow);
+    printf("  %-52s %s (read-back %#" PRIx64 ")\n", "  (shadow VMCS round-trip)",
+           sr == HV_SUCCESS && shadow == 0x1234 ? "wired" : "not observed", shadow);
+    mx("hv_vmx_vcpu_set_shadow_access", hv_vmx_vcpu_set_shadow_access(v, VMCS_GUEST_ES, HV_SHADOW_VMCS_READ));
+    mx("hv_vmx_read_capability", hv_vmx_read_capability(HV_VMX_CAP_PINBASED, &value));
+    mx("hv_vmx_get_msr_info", hv_vmx_get_msr_info(HV_VMX_INFO_MSR_IA32_ARCH_CAPABILITIES, &value));
+    printf("  %-52s %#" PRIx64 "\n", "  (msr_info value)", value);
+    mx("hv_vmx_vcpu_set_apic_address", hv_vmx_vcpu_set_apic_address(v, 0xFEE00000));
+    mx("hv_vmx_vcpu_set_apic_address_space", hv_vmx_vcpu_set_apic_address_space(v, HV_VM_SPACE_DEFAULT, 0xFEE00000));
+
+    mx("hv_vcpu_destroy", hv_vcpu_destroy(v));
+    mx("hv_vm_destroy", hv_vm_destroy());
+    apiSummary();
+    munmap(extra, 2 * PAGE);
+    munmap(ram, RAM_SIZE);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -305,6 +560,10 @@ int main(int argc, char **argv)
         printf("  %-52s %s\n", "hv_vm_create twice in one task", hvName(again));
         fflush(stdout);
         _exit(0);
+    }
+    if (argc > 1 && strcmp(argv[1], "--matrix") == 0) {
+        probeApiMatrix();
+        return 0;
     }
 
     printf("Hypervisor.framework provider probe\n");
@@ -451,6 +710,9 @@ int main(int argc, char **argv)
 
     printf("\n[7] vCPU limit (separate task)\n");
     runSelf("--vcpu-count");
+
+    printf("\n[8] full public API matrix (separate task)\n");
+    runSelf("--matrix");
 
     printf("\ndone. HV_UNSUPPORTED = the provider does not implement the call; HV_BAD_ARGUMENT/\n"
            "HV_NO_DEVICE = it implements it but refuses this request. Compare this output before and\n"

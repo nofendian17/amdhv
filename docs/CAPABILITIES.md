@@ -9,8 +9,9 @@ make tools
 ./build/hvf-probe          # needs the com.apple.security.hypervisor entitlement, already applied
 ```
 
-The probe forks/execs itself for the three probes that need a task without a VM (the in-kernel APIC
-variant, a second `hv_vm_create`, and the vCPU count). Everything else runs in one task.
+The probe forks/execs itself for the four probes that need a task without a VM (the in-kernel APIC
+variant, a second `hv_vm_create`, the vCPU count and the full API matrix). Everything else runs in
+one task.
 
 The enablement, SVM-core and framework checklist behind this matrix — including what is deliberately
 not implemented and the gap register — is in
@@ -122,6 +123,123 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vcpu_exit_info` / `vmx_status` | `HV_ERROR` | ro page 0x20/0x30 are 0, i.e. "no extra information", as on Apple |
 | `hv_vmx_read_capability` | yes | the VMX capability words VZ/QEMU build their controls from |
 | `hv_vmx_vcpu_read/write_vmcs` | yes | the VMCS shadow in `VmcsState.hpp` |
+
+## Full public API matrix, measured on 0.2.0
+
+The older probe walked client paths and left nine SDK names unmeasured. `hvf-probe --matrix` now
+calls all 79 exported x86 functions once with benign arguments in a fresh task and prints each
+answer. Run it with:
+
+```bash
+./build/hvf-probe --matrix
+```
+
+Measured on an AMD Ryzen 5 3600, macOS 15.8.3, kext 0.2.0, SDK macOS 15 (clock and TSC-offset
+numbers change per run):
+
+```
+Public x86 Hypervisor.framework API matrix (SDK macOS 15)
+  hv_vm_create                                         ok
+  hv_vm_space_create                                   ok
+  hv_capability                                        ok
+    (hv_capability value)                              VCPUMAX=64
+  hv_vm_map                                            ok
+  hv_vm_protect                                        ok
+  hv_vm_map_space                                      ok
+  hv_vm_protect_space                                  ok
+  hv_vm_unmap_space                                    ok
+  hv_vm_unmap                                          ok
+  hv_vm_sync_tsc                                       ok
+  hv_tsc_clock                                         73091529535968 (uint64_t, not hv_return_t)
+  hv_vm_add_pio_notifier                               HV_UNSUPPORTED
+  hv_vm_remove_pio_notifier                            HV_UNSUPPORTED
+  hv_vcpu_create                                       ok
+  hv_vcpu_set_space                                    ok
+  hv_vm_space_destroy                                  ok
+  hv_vcpu_read_register                                ok
+  hv_vcpu_write_register                               ok
+  hv_vcpu_read_fpstate                                 ok
+  hv_vcpu_write_fpstate                                ok
+  hv_vcpu_enable_native_msr                            ok
+  hv_vcpu_enable_managed_msr                           ok
+  hv_vcpu_set_msr_access                               ok
+  hv_vcpu_write_msr                                    ok
+  hv_vcpu_read_msr                                     ok
+  hv_vcpu_flush                                        HV_UNSUPPORTED
+  hv_vcpu_invalidate_tlb                               ok
+  hv_vcpu_interrupt                                    ok
+  hv_vcpu_set_tsc_relative                             ok
+    (set_tsc_relative effect)                          not the requested delta (offset 0xffffbd860d58f6c1 -> 0xffffbd860d58f6c1, delta 0)
+  hv_vcpu_run                                          ok
+  hv_vcpu_run_until                                    ok
+  hv_vcpu_get_exec_time                                ok
+  hv_vcpu_get_idle_time                                ok
+  hv_vcpu_vmx_status                                   HV_ERROR
+  hv_vcpu_exit_info                                    HV_ERROR
+  hv_vm_lapic_set_intr                                 HV_UNSUPPORTED
+  hv_vm_lapic_msi                                      HV_UNSUPPORTED
+  hv_vm_ioapic_assert_irq                              HV_UNSUPPORTED
+  hv_vm_ioapic_deassert_irq                            HV_UNSUPPORTED
+  hv_vm_ioapic_pulse_irq                               HV_UNSUPPORTED
+  hv_vm_ioapic_read                                    HV_UNSUPPORTED
+  hv_vm_ioapic_write                                   HV_UNSUPPORTED
+  hv_vm_ioapic_get_state                               HV_UNSUPPORTED
+  hv_vm_ioapic_put_state                               HV_UNSUPPORTED
+  hv_vm_send_ioapic_intr                               HV_UNSUPPORTED
+  hv_vm_atpic_assert_irq                               HV_UNSUPPORTED
+  hv_vm_atpic_deassert_irq                             HV_UNSUPPORTED
+  hv_vm_atpic_port_read                                HV_UNSUPPORTED
+  hv_vm_atpic_port_write                               HV_UNSUPPORTED
+  hv_vm_atpic_get_state                                HV_UNSUPPORTED
+  hv_vm_atpic_put_state                                HV_UNSUPPORTED
+  hv_vm_set_apic_bus_freq                              HV_UNSUPPORTED
+  hv_vcpu_inject_extint                                HV_UNSUPPORTED
+  hv_vcpu_apic_read                                    HV_UNSUPPORTED
+  hv_vcpu_apic_write                                   HV_UNSUPPORTED
+  hv_vcpu_apic_get_state                               HV_UNSUPPORTED
+  hv_vcpu_apic_put_state                               HV_UNSUPPORTED
+  hv_vcpu_exit_init_ap                                 HV_ERROR
+  hv_vcpu_exit_startup_ap                              HV_ERROR
+  hv_vcpu_exit_ioapic_eoi                              HV_ERROR
+  hv_vcpu_exit_apic_access_read                        HV_ERROR
+  hv_vcpu_exit_inject_excp                             HV_ERROR
+  hv_vcpu_apic_lsc_enter_r32                           HV_UNSUPPORTED
+  hv_vcpu_apic_lsc_enter_imm32                         HV_UNSUPPORTED
+  hv_vcpu_apic_lsc_invalidate                          HV_UNSUPPORTED
+  hv_vcpu_apic_ctrl                                    HV_UNSUPPORTED
+  hv_vcpu_apic_trigger_lvt                             HV_UNSUPPORTED
+  hv_vmx_vcpu_read_vmcs                                ok
+  hv_vmx_vcpu_write_vmcs                               ok
+  hv_vmx_vcpu_get_cap_write_vmcs                       ok
+  hv_vmx_vcpu_read_shadow_vmcs                         ok
+  hv_vmx_vcpu_write_shadow_vmcs                        ok
+    (shadow VMCS round-trip)                           wired (read-back 0x1234)
+  hv_vmx_vcpu_set_shadow_access                        HV_UNSUPPORTED
+  hv_vmx_read_capability                               ok
+  hv_vmx_get_msr_info                                  ok
+    (msr_info value)                                   0
+  hv_vmx_vcpu_set_apic_address                         ok
+  hv_vmx_vcpu_set_apic_address_space                   ok
+  hv_vcpu_destroy                                      ok
+  hv_vm_destroy                                        ok
+  public API functions observed                        79 of 79
+```
+
+Three `ok` answers need a careful reading before they become a compatibility claim:
+
+- `hv_vcpu_set_tsc_relative` succeeds but the VMCS TSC offset does not move, so the AMD core does
+  not apply it. `Frontend.cpp` still logs a TSC slot write as not applied; `hv_vm_sync_tsc` is the
+  supported path.
+- `hv_vmx_vcpu_read/write_shadow_vmcs` store and return the value in the framework's client-side
+  area (the 0x1234 round-trip proves that), but SVM has no shadow VMCS for the core to consume.
+  `hv_vmx_vcpu_set_shadow_access` is honestly `HV_UNSUPPORTED`.
+- `hv_vmx_vcpu_set_apic_address_space` is a no-op success, like the already documented
+  `hv_vmx_vcpu_set_apic_address`: the core keeps the TPR in `V_TPR` and never reads that page.
+
+`hv_capability` reports `VCPUMAX=64`, matching `AMDHV_MAX_VCPUS_PER_VM`; `hv_tsc_clock` returns a
+monotonic value; `hv_vmx_get_msr_info` answers 0 for the Intel-only `IA32_ARCH_CAPABILITIES` info
+field. The five `hv_vcpu_exit_*` helpers and `hv_vcpu_vmx_status`/`hv_vcpu_exit_info` answer
+`HV_ERROR` / `HV_UNSUPPORTED` because they only have meaning with the refused in-kernel APIC.
 
 ## Capability words follow the implementation
 
