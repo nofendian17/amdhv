@@ -1322,25 +1322,37 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     switch (code) {
     case 0x8001: {                                   /* apic_read: result, offset */
         uint64_t off = 0;
-        if (copyin(p2, &off, 4))
-            return kHvError;
+        const int e = copyin(p2, &off, 4);
+        static volatile SInt32 logged;
+        if (OSIncrementAtomic(&logged) < 8)
+            AMDHV_INFO("hv front end: apic_read p1=%#llx p2=%#llx p3=%#llx off=%#llx e=%d",
+                       (unsigned long long)p1, (unsigned long long)p2, (unsigned long long)p3,
+                       (unsigned long long)off, e);
+        if (e) return kHvError;
         const uint32_t val = amdhv::apic::readReg(v->lapic, (uint32_t)off);
         return copyout(&val, p1, 4) ? kHvError : kHvOk;
     }
     case 0x8002: {                                   /* apic_write: no-side-effect, offset, value */
         uint64_t off = 0, val = 0;
-        if (copyin(p2, &off, 4) || copyin(p3, &val, 4))
-            return kHvError;
+        const int e1 = copyin(p2, &off, 4), e2 = copyin(p3, &val, 4);
+        static volatile SInt32 logged2;
+        if (OSIncrementAtomic(&logged2) < 8)
+            AMDHV_INFO("hv front end: apic_write p1=%#llx p2=%#llx p3=%#llx off=%#llx val=%#llx e=%d/%d",
+                       (unsigned long long)p1, (unsigned long long)p2, (unsigned long long)p3,
+                       (unsigned long long)off, (unsigned long long)val, e1, e2);
+        if (e1 || e2) return kHvError;
         amdhv::apic::writeReg(v->lapic, (uint32_t)off, (uint32_t)val);
         const uint8_t noSideEffect = 1;
         if (p1 && copyout(&noSideEffect, p1, 1))
             return kHvError;
         return kHvOk;
     }
-    case 0x0003:                                     /* put_state */
+    case 0xe003:                                     /* put_state */
+    case 0x0003:
         return amdhv::apic::writeState(v->lapic, (const void *)(uintptr_t)(w[0] >> 8))
                    ? kHvOk : kHvError;
-    case 0x0004:                                     /* get_state */
+    case 0xe004:                                     /* get_state */
+    case 0x0004:
         amdhv::apic::readState(v->lapic, (void *)(uintptr_t)(w[0] >> 8));
         return kHvOk;
     case 0x0006: {                                   /* apic_ctrl: controls pointer */
