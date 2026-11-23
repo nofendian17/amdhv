@@ -76,6 +76,24 @@ under VirtualBox and Android works under the Android emulator through the same H
 this is QEMU-specific. See [docs/QEMU.md](docs/QEMU.md) for details; `scripts/qemu-test.sh` is kept
 for reference only and no signing step is needed with MacPorts QEMU.
 
+### Parallels Desktop is not supported
+
+Parallels Desktop 26.5.0 cannot start a VM on an AMD CPU. Its `prl_vm_app` reads the CPUID vendor and
+refuses `AuthenticAMD` **before** it makes any `hv_*` call:
+
+```
+Unsupported CPU vendor 0x68747541 0x69746e65 0x444d4163   ("Auth" "enti" "cAMD")
+CPU features initialization failed. CPU is unsupported. Vendor AuthenticAMD
+→ PRL_ERR_VM_POWER_ON_FAILED
+```
+
+On this host, starting a Parallels VM leaves `vmCreates` in `amd-info stats` unchanged and adds no
+Parallels PID to the AMDHV kernel log — the request never reaches the kext. This is a client-side
+vendor check, not a limitation of AMDHV: UTM, Kiri and VirtualBox use the same provider successfully.
+
+The earlier RyzenHV project patched the Parallels binary in memory to bypass this check. AMDHV is
+native-mode only — no shim, no client patches — so that approach is not maintained here.
+
 ## Boot-args
 
 Only two are needed — exactly what `install-to-efi.sh` adds:

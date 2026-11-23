@@ -41,6 +41,25 @@ the [README Install section](../README.md#install).
 client's VM process: `vmExits` stops increasing, and resumes when the VM runs again. That method
 was used to confirm the VirtualBox and Android results, since a visible window alone proves nothing.
 
+## Not supported: Parallels Desktop
+
+Parallels Desktop 26.5.0 is **not supported** on AMD hosts. `prl_vm_app` checks the CPUID vendor and
+rejects `AuthenticAMD` before it reaches Hypervisor.framework:
+
+```
+Unsupported CPU vendor 0x68747541 0x69746e65 0x444d4163
+CPU features initialization failed. CPU is unsupported. Vendor AuthenticAMD
+→ PRL_ERR_VM_POWER_ON_FAILED
+```
+
+Evidence that this happens before AMDHV is involved: `vmCreates` in `amd-info stats` does not change
+when a Parallels VM starts, and no Parallels PID appears in the kernel log. UTM, Kiri and VirtualBox
+work through the same kext, so the kext is not the blocker.
+
+The former RyzenHV project bypassed this check by patching the Parallels binary in memory. AMDHV is
+native-mode only — no shim and no client patches — so that workaround is out of scope. Use a client
+from the table above instead.
+
 ## Common pitfalls
 
 - Two hypervisor providers cannot coexist: remove a RyzenHV kext from `EFI/OC/Kexts` and its
