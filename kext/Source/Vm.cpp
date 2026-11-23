@@ -724,6 +724,7 @@ bool com_amdhv_AMDHVVm::init()
     fTscNative     = false;
     fApicAccel     = false;
     fApicLapic     = nullptr;
+    fApicIoApic    = nullptr;
     fForceTlbFlush = 0;
     fTlbGenSeen    = 0;           /* 0 != fTlbGen (starts at 1): the first run flushes */
     fSleepEpoch    = svm::sleepEpoch();
@@ -1324,15 +1325,17 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         v->control.eventInjErr = 0;
 
         /*
-         * In-kernel APIC: a guest that accesses its LAPIC through memory faults on the unmapped
-         * 0xFEE00000 page. If the instruction is one of the two absolute MOV forms and its address
-         * is exactly the faulting GPA, serve it from the model and resume the guest. Anything else
-         * (a different decode, a paged RIP we could not read) still goes to the userspace VMM.
+         * In-kernel APIC: serve absolute MOV accesses to the LAPIC (0xFEE00000) and I/O APIC
+         * (0xFEC00000) pages from the models when the page is not mapped. Only act when the decoded
+         * address equals the faulting GPA; anything else still goes to the userspace VMM.
          */
         if (fApicAccel && fApicLapic && code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1)) {
             const uint64_t fault = v->control.exitInfo2;
-            const uint32_t off = amdhv::apic::mmioOffset(fault, 0xFEE00000ull);
-            if (off != 0xFFFFFFFFu) {
+            const uint32_t offL = amdhv::apic::mmioOffset(fault, 0xFEE00000ull);
+            const uint32_t offI = fApicIoApic ? amdhv::apic::mmioOffset(fault, 0xFEC00000ull) : 0xFFFFFFFFu;
+            const bool lapic = offL != 0xFFFFFFFFu;
+            const bool ioapic = offI != 0xFFFFFFFFu;
+            if (lapic || ioapic) {
                 uint8_t insn[7] = {0};
                 if (fShared->guestBytes(fSpace, v->save.rip, insn, sizeof(insn))) {
                     const amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(insn, sizeof(insn));
@@ -1348,11 +1351,29 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
                         case 7: reg = &fGprs.rdi;  break;
                         default: break;              /* RSP: never used for APIC registers */
                         }
+                        bool served = false;
                         if (reg) {
-                            if (op.isWrite)
-                                amdhv::apic::writeReg(*fApicLapic, off, (uint32_t)*reg);
-                            else
-                                *reg = amdhv::apic::readReg(*fApicLapic, off);
+                            if (lapic) {
+                                if (op.isWrite)
+                                    amdhv::apic::writeReg(*fApicLapic, offL, (uint32_t)*reg);
+                                else
+                                    *reg = amdhv::apic::readReg(*fApicLapic, offL);
+                                served = true;
+                            } else if (offI == 0 || offI == 0x10) {
+                                /* IOREGSEL at +0, IOWIN at +0x10. */
+                                if (op.isWrite) {
+                                    if (offI == 0)
+                                        fApicIoApic->ioregsel = (uint32_t)*reg & 0xFF;
+                                    else
+                                        amdhv::apic::ioWrite(*fApicIoApic, fApicIoApic->ioregsel, (uint32_t)*reg);
+                                } else {
+                                    *reg = offI == 0 ? fApicIoApic->ioregsel
+                                                     : amdhv::apic::ioRead(*fApicIoApic, fApicIoApic->ioregsel);
+                                }
+                                served = true;
+                            }
+                        }
+                        if (served) {
                             if (op.reg == 0)
                                 v->save.rax = rax;
                             v->save.rip += op.length;
@@ -1364,7 +1385,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             }
         }
 
-        /*
+/*
          * MSR_IA32_SPEC_CTRL (0x48) and MSR_IA32_PRED_CMD (0x49) are Intel-only: the AMD CPU has no
          * such MSR, so a native RDMSR/WRMSR raises #GP in the guest. msrOp() reports the client's
          * enable_native_msr call as successful but keeps the MSRPM intercept; handle the exit here

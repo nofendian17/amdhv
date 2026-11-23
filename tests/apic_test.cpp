@@ -105,6 +105,12 @@ void testLapicRegisters()
     CHECK(amdhv::apic::readReg(s, 0x0A0) == 0x50);
     amdhv::apic::writeReg(s, 0x300, 0x21);
     CHECK(amdhv::apic::readReg(s, 0x300) == 0x21);
+    /* EOI clears the highest in-service vector, not the ESR register. */
+    amdhv::apic::setIrr(s, 0x61);
+    CHECK(amdhv::apic::takeInterrupt(s) == 0x61);
+    CHECK(amdhv::apic::highestIsrVector(s) == 0x61);
+    amdhv::apic::writeReg(s, 0x0B0, 0);
+    CHECK(amdhv::apic::highestIsrVector(s) == 0);
     amdhv::apic::writeReg(s, 0x350, 0xE0);
     CHECK(amdhv::apic::readReg(s, 0x350) == 0xE0);
     CHECK(amdhv::apic::readReg(s, 0x777) == 0);

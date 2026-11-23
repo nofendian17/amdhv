@@ -433,7 +433,7 @@ kern_return_t tVcpuCreate(void *target, uint64_t arg)
             vmUnpin(vm);
             return hvFromIoEarly(err);
         }
-        v->cpu->setApicModel(vm->apicAccel, &v->lapic);
+        v->cpu->setApicModel(vm->apicAccel, &v->lapic, &vm->ioapic);
     }
     IOLockLock(vm->lock);
     unsigned id = 0;

@@ -157,10 +157,12 @@ public:
     void     forceTlbFlush() { __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE); }
 
     /* A VM created with HV_VM_ACCEL_APIC gives us its per-vCPU LAPIC model for MMIO emulation. */
-    void     setApicModel(bool accel, amdhv::apic::LapicState *model)
+    void     setApicModel(bool accel, amdhv::apic::LapicState *lapic,
+                          amdhv::apic::IoApicState *ioapic)
     {
         fApicAccel = accel;
-        fApicLapic = model;
+        fApicLapic = lapic;
+        fApicIoApic = ioapic;
     }
 
     IOReturn getFpu(AMDHVFpuState *out);
@@ -192,6 +194,7 @@ private:
     bool                      fTscNative;        /* the client asked for native MSR 0x10: run() emulates it in-kernel */
     bool                      fApicAccel;        /* HV_VM_ACCEL_APIC: emulate APIC MMIO exits in-kernel */
     amdhv::apic::LapicState  *fApicLapic;        /* owned by the front end's HvVcpu */
+    amdhv::apic::IoApicState *fApicIoApic;       /* owned by the front end's HvVm */
     uint32_t                  fFpuSize;
     volatile uint32_t         fKick;
     volatile uint32_t         fForceTlbFlush;    /* hv_vcpu_invalidate_tlb asked for a flush */

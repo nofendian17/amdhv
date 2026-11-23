@@ -163,7 +163,7 @@ inline void writeReg(LapicState &s, uint32_t off, uint32_t value)
 {
     if (off == 0x080) s.tpr = value;
     else if (off == 0x090) s.apr = value;
-    else if (off == 0x0B0) s.esr = value;
+    else if (off == 0x0B0) setEoi(s, highestIsrVector(s));   /* EOI: clear the highest ISR bit */
     else if (off == 0x0F0) s.svr = value;
     else if (off >= 0x100 && off < 0x180) s.isr[(off - 0x100) >> 4] = value;
     else if (off >= 0x180 && off < 0x200) s.tmr[(off - 0x180) >> 4] = value;

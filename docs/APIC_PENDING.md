@@ -52,17 +52,19 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
 1. **No further reboot is required for correctness.** The final build accepts all 32 APIC calls;
    `apic_read`/`write` are no-ops by design, documented as such. Install it whenever convenient and
    optionally confirm `hvf-probe --apic` shows no `HV_ERROR` besides the five `exit_*` helpers.
-2. **Five `hv_vcpu_exit_*` helpers** answer `HV_ERROR` and never reach a trap. They are answered by
-   Apple's userspace layer; no kext-side fix is known yet.
+2. **Five `hv_vcpu_exit_*` helpers** answer `HV_ERROR` and never reach a trap, even with
+   `HV_VM_ACCEL_APIC`. They are a framework-to-client notification mechanism, not a provider call:
+   the provider would have to synthesize the matching APIC exit first, and the kernel never exposes
+   an API for that. A dyld interpose shim in the client process is the only remaining avenue; that is
+   a separate userspace project and is explicitly out of scope here. Do not add kext stubs for them —
+   the calls never arrive.
 4. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
-   a guest reading/writing `0xFEE00000` directly is not intercepted. EOI is likewise not handled, so
-   an ISR bit set by injection stays set until `put_state` replaces the model.
    `kext/Source/ApicMmio.hpp` + `tests/apic_mmio_test.cpp` decode the two absolute MOV forms a guest uses
    for absolute APIC accesses. The NPF path now uses that decoder, but only emulates when the decoded
    address equals the faulting GPA; the instruction is read from guest memory through
-   `VmShared::guestBytes()`. Only LAPIC MMIO is wired — the I/O APIC page still goes to the client.
-   EOI is likewise not handled, so an ISR bit set by injection stays set until `put_state` replaces
-   the model.
+   `VmShared::guestBytes()`. Both the LAPIC page (`0xFEE00000`) and the I/O APIC IOREGSEL/IOWIN
+   pair (`0xFEC00000`/`+0x10`) are wired to the models. EOI writes to LAPIC `0x0B0` clear the
+   highest ISR bit (host-tested), so an injected interrupt can be retired by a guest EOI.
    Live check: with `amdhv_apic=1`, the guest MOV to `0xFEE00080` completes and the following HLT
    exits at `RIP 0x1007`. EAX reads `0x160`, not the modelled TPR `0x55`: Apple's framework maps the
    LAPIC page itself in an APIC-accelerated VM, so the NPF fallback did not fire. Treat the NPF path
