@@ -580,6 +580,8 @@ static void probeApicFamily(void)
     hv_atpic_state_ext_t atpic = { 0 };
     hv_ioapic_state_ext_t ioapic = { 0 };
 
+    printf("  %-52s %p %p %p %p\n", "  (locals data/noSide/apic/active)", &data, &noSideEffect, &apic, active);
+
     APIC("hv_vm_atpic_assert_irq(0)", hv_vm_atpic_assert_irq(0));
     APIC("hv_vm_atpic_deassert_irq(0)", hv_vm_atpic_deassert_irq(0));
     APIC("hv_vm_atpic_port_read(0x21)", hv_vm_atpic_port_read(0x21, &byte));
@@ -608,6 +610,10 @@ static void probeApicFamily(void)
         APIC("hv_vcpu_apic_lsc_enter_r32", hv_vcpu_apic_lsc_enter_r32(v, true, 0x1000, 1, 8, HV_X86_RAX, NULL, 0));
         APIC("hv_vcpu_apic_lsc_enter_imm32", hv_vcpu_apic_lsc_enter_imm32(v, 0x1000, 1, 8, 0, NULL, 0));
         APIC("hv_vcpu_apic_lsc_invalidate", hv_vcpu_apic_lsc_invalidate(v));
+        uint32_t rt = 0;
+        hv_return_t wr = hv_vcpu_apic_write(v, 0x80, 0x55, &noSideEffect);
+        hv_return_t rd = hv_vcpu_apic_read(v, 0x80, &rt);
+        printf("  %-52s write=%d read=%d val=%#x\n", "  (apic TPR round-trip)", wr, rd, rt);
         APIC("hv_vcpu_exit_init_ap", hv_vcpu_exit_init_ap(v, active, 1));
         APIC("hv_vcpu_exit_startup_ap", hv_vcpu_exit_startup_ap(v, active, 1, &rip));
         APIC("hv_vcpu_exit_ioapic_eoi", hv_vcpu_exit_ioapic_eoi(v, &vec));

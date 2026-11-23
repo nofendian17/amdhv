@@ -5,6 +5,7 @@
  */
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "../kext/Source/ApicState.hpp"
 
@@ -95,6 +96,31 @@ void testAtpic()
     CHECK(s.service == (1u << 4));
 }
 
+void testLapicRegisters()
+{
+    amdhv::apic::LapicState s;
+    amdhv::apic::reset(s);
+    amdhv::apic::writeReg(s, 0x080, 0x50);
+    CHECK(amdhv::apic::readReg(s, 0x080) == 0x50);
+    CHECK(amdhv::apic::readReg(s, 0x0A0) == 0x50);
+    amdhv::apic::writeReg(s, 0x300, 0x21);
+    CHECK(amdhv::apic::readReg(s, 0x300) == 0x21);
+    amdhv::apic::writeReg(s, 0x350, 0xE0);
+    CHECK(amdhv::apic::readReg(s, 0x350) == 0xE0);
+    CHECK(amdhv::apic::readReg(s, 0x777) == 0);
+    uint8_t ext[8 + sizeof(amdhv::apic::LapicState)] = {0};
+    amdhv::apic::readState(s, ext);
+    uint32_t ver = 0;
+    memcpy(&ver, ext, 4);
+    CHECK(ver == 100);
+    amdhv::apic::LapicState copy;
+    amdhv::apic::reset(copy);
+    CHECK(amdhv::apic::writeState(copy, ext));
+    CHECK(amdhv::apic::readReg(copy, 0x080) == 0x50);
+    ext[0] = 0;                                   /* wrong version must be refused */
+    CHECK(!amdhv::apic::writeState(copy, ext));
+}
+
 void testLayouts()
 {
     CHECK(sizeof(amdhv::apic::LapicState) == 240);
@@ -110,6 +136,7 @@ int main()
     testLapicBounds();
     testIoApic();
     testAtpic();
+    testLapicRegisters();
     testLayouts();
     if (fails) {
         printf("apic_test: %d failure(s)\n", fails);

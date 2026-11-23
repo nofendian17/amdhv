@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace amdhv {
 namespace apic {
@@ -138,6 +139,55 @@ inline unsigned takeInterrupt(LapicState &s)
         }
     }
     return 0;
+}
+
+/* MMIO view of the LAPIC register file used by hv_vcpu_apic_read/write. Offsets the state struct
+ * does not model are accepted but read as zero; the fields a guest actually uses are mapped. */
+inline uint32_t readReg(const LapicState &s, uint32_t off)
+{
+    if (off == 0x080) return s.tpr;
+    if (off == 0x090) return s.apr;
+    if (off == 0x0A0) return pprClass(s) << 4;
+    if (off == 0x0B0) return s.esr;
+    if (off == 0x0F0) return s.svr;
+    if (off >= 0x100 && off < 0x180) return s.isr[(off - 0x100) >> 4];
+    if (off >= 0x180 && off < 0x200) return s.tmr[(off - 0x180) >> 4];
+    if (off >= 0x200 && off < 0x280) return s.irr[(off - 0x200) >> 4];
+    if (off == 0x300) return s.icr[0];
+    if (off == 0x310) return s.icr[1];
+    if (off >= 0x320 && off <= 0x370 && ((off - 0x320) & 0xF) == 0) return s.lvt[(off - 0x320) >> 4];
+    return 0;
+}
+
+inline void writeReg(LapicState &s, uint32_t off, uint32_t value)
+{
+    if (off == 0x080) s.tpr = value;
+    else if (off == 0x090) s.apr = value;
+    else if (off == 0x0B0) s.esr = value;
+    else if (off == 0x0F0) s.svr = value;
+    else if (off >= 0x100 && off < 0x180) s.isr[(off - 0x100) >> 4] = value;
+    else if (off >= 0x180 && off < 0x200) s.tmr[(off - 0x180) >> 4] = value;
+    else if (off >= 0x200 && off < 0x280) s.irr[(off - 0x200) >> 4] = value;
+    else if (off == 0x300) s.icr[0] = value;
+    else if (off == 0x310) s.icr[1] = value;
+    else if (off >= 0x320 && off <= 0x370 && ((off - 0x320) & 0xF) == 0) s.lvt[(off - 0x320) >> 4] = value;
+}
+
+inline void readState(const LapicState &s, void *ext)
+{
+    const uint32_t ver = 100;                 /* HV_APIC_STATE_EXT_VER */
+    memcpy(ext, &ver, 4);                     /* +4 is padding in the SDK struct */
+    memcpy((uint8_t *)ext + 8, &s, sizeof(s));
+}
+
+inline bool writeState(LapicState &s, const void *ext)
+{
+    uint32_t ver = 0;
+    memcpy(&ver, ext, 4);
+    if (ver != 100)                           /* HV_APIC_STATE_EXT_VER */
+        return false;
+    memcpy(&s, (const uint8_t *)ext + 8, sizeof(s));
+    return true;
 }
 
 /* Highest unmasked 8259A request, translated to an interrupt vector via ICW2's base. */

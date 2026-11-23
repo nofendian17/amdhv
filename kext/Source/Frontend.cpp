@@ -1304,10 +1304,9 @@ kern_return_t tLapicMsi(void *target, uint64_t arg)
     return target ? kHvOk : kHvNoDev;
 }
 
-/* Thread trap 13: per-vCPU APIC sub-ops. The observed blocks are: word0 = 0 for inject_extint,
- * 0x8001/0x8002 for apic read/write (three pointer words), a pointer to a nested block for
- * get/put state, and small codes for ctrl/LVT/LSC. Log the pointers' contents once so the next
- * probe run can pin the layouts; meanwhile answer success as a compatibility no-op. */
+/* Thread trap 13: per-vCPU APIC sub-ops. Pointer words are shifted left by 8; the low byte is a
+ * tag (0x8001 apic_read, 0x8002 apic_write, 3 put_state, 4 get_state) or a small code for
+ * ctrl/LVT/LSC. The SDK ext structs put state at +8 (after version and padding). */
 kern_return_t tApicSubOp(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 13, arg);
@@ -1317,25 +1316,50 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     uint64_t w[4] = {0, 0, 0, 0};
     if (copyin((user_addr_t)arg, w, sizeof(w)) != 0)
         return kHvError;
-    static volatile SInt32 logged;
-    if (OSIncrementAtomic(&logged) < 40) {
-        uint64_t deref[4] = {0, 0, 0, 0};
-        for (unsigned i = 0; i < 4; i++)
-            if (w[i] >= 0x100000000ull && w[i] < 0x800000000000ull)
-                copyin((user_addr_t)w[i], &deref[i], 8);
-        AMDHV_INFO("hv front end: APIC subop %#llx words=%#llx %#llx %#llx %#llx deref=%#llx %#llx %#llx %#llx",
-                   (unsigned long long)arg, (unsigned long long)w[0], (unsigned long long)w[1],
-                   (unsigned long long)w[2], (unsigned long long)w[3], (unsigned long long)deref[0],
-                   (unsigned long long)deref[1], (unsigned long long)deref[2], (unsigned long long)deref[3]);
-        if (w[0] >= 0x100000000ull) {             /* get/put state: nested block behind a tagged pointer */
-            uint64_t nw[8] = {0};
-            if (copyin((user_addr_t)(w[0] & ~7ull), nw, sizeof(nw)) == 0)
-                AMDHV_INFO("hv front end: APIC nested %#llx %#llx %#llx %#llx", (unsigned long long)nw[0],
-                           (unsigned long long)nw[1], (unsigned long long)nw[2], (unsigned long long)nw[3]);
-        }
+    const unsigned code = (unsigned)w[0] & 0xFFFF;
+    const user_addr_t p1 = (user_addr_t)(w[1] >> 8), p2 = (user_addr_t)(w[2] >> 8),
+                      p3 = (user_addr_t)(w[3] >> 8);
+    switch (code) {
+    case 0x8001: {                                   /* apic_read: result, offset */
+        uint64_t off = 0;
+        if (copyin(p2, &off, 4))
+            return kHvError;
+        const uint32_t val = amdhv::apic::readReg(v->lapic, (uint32_t)off);
+        return copyout(&val, p1, 4) ? kHvError : kHvOk;
     }
-    /* No guest-visible delivery yet; the calls are accepted so clients can continue. */
-    return kHvOk;
+    case 0x8002: {                                   /* apic_write: no-side-effect, offset, value */
+        uint64_t off = 0, val = 0;
+        if (copyin(p2, &off, 4) || copyin(p3, &val, 4))
+            return kHvError;
+        amdhv::apic::writeReg(v->lapic, (uint32_t)off, (uint32_t)val);
+        const uint8_t noSideEffect = 1;
+        if (p1 && copyout(&noSideEffect, p1, 1))
+            return kHvError;
+        return kHvOk;
+    }
+    case 0x0003:                                     /* put_state */
+        return amdhv::apic::writeState(v->lapic, (const void *)(uintptr_t)(w[0] >> 8))
+                   ? kHvOk : kHvError;
+    case 0x0004:                                     /* get_state */
+        amdhv::apic::readState(v->lapic, (void *)(uintptr_t)(w[0] >> 8));
+        return kHvOk;
+    case 0x0006: {                                   /* apic_ctrl: controls pointer */
+        uint64_t ctrls = 0;
+        if (p1 && copyin(p1, &ctrls, 8) == 0)
+            v->lapic.apic_controls = ctrls;
+        return kHvOk;
+    }
+    case 0x0107:                                     /* trigger_lvt: no vector supplied by the framework */
+    case 0x0005:                                     /* LSC enter / invalidate */
+    case 0x0000:                                     /* inject_extint */
+        return kHvOk;
+    default: {
+        static volatile SInt32 logged;
+        if (OSIncrementAtomic(&logged) < 8)
+            AMDHV_INFO("hv front end: APIC subop %#llx unknown code %#x", (unsigned long long)arg, code);
+        return kHvUnsupportedCode;
+    }
+    }
 }
 
 template <unsigned Type, unsigned Index>
