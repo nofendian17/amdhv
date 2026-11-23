@@ -343,10 +343,16 @@ block codes. On the latest installed kext, 27 of the 32 APIC calls answer `ok`; 
 `hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's userspace layer. IOAPIC get/put state
 used the wrong word of the arg block and is fixed in this tree, pending a reboot to confirm.
 
-Nothing is advertised as full support: five `hv_vcpu_exit_*` helpers still fail and guest-visible
-interrupt delivery for APIC-accelerated VMs is only now being wired (8259A/IOAPIC → LAPIC IRR →
-VM-entry event injection). That path is host-tested and builds into the kext but needs a reboot
-before it can be called verified.
+The guest path is now live-verified with `hvf-probe --apic-run`: a real-mode guest with an IVT entry
+for vector `0x30` and an IOAPIC redirect from IRQ0 exits with RIP `0x1200` (the handler), not the
+entry HLT at `0x1000`. The trap log shows `pending=48` for that run. The fix that made it work was
+the `hv_ioapic_state_ext_t` layout: state starts at offset `+8`, not `+4`; the 4-byte shift made the
+mask bit appear set. `offsetof` on the macOS 15 SDK gives `ioapic=8`, `apic=8`, `atpic=4`.
+
+Only the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR`; they never reach a trap and appear
+to be answered by Apple's userspace layer. This is still not full compatibility with every APIC
+sub-op: thread-13 state read/write semantics are accepted as no-ops, and guest-visible routing is
+limited to the 8259A/IOAPIC → LAPIC IRR path exercised above.
 
 ## A framework quirk worth knowing
 

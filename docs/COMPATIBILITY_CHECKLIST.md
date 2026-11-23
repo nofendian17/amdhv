@@ -255,11 +255,17 @@ confirm. Thread-13 blocks are logged as no-ops: `0` (inject_extint), `0x8001`/`0
 read/write, three pointer words), a tagged pointer to a nested block (get/put state), `0x6` (ctrl),
 `0x107` (LVT trigger), `0x5` (LSC enter/invalidate). Their nested contents are still not decoded.
 
-Delivery into the guest is now wired for APIC-accelerated VMs: pending 8259A/IOAPIC requests feed the
-vCPU's LAPIC IRR, the guest's TPR updates `LapicState::tpr`, and the highest priority vector is
-presented through VM-entry event injection before VMRUN (`Frontend.cpp`). `ApicState.hpp` gained
-`atpicPending()` with a host test. This code needs a reboot with the new kext before it is
-live-verified; until then it is not claimed as working.
+Delivery into the guest is now wired and live-verified for APIC-accelerated VMs: pending 8259A/IOAPIC
+requests feed the vCPU's LAPIC IRR, the guest TPR is mirrored into `LapicState::tpr`, and the highest
+priority vector is presented through VM-entry event injection before VMRUN (`Frontend.cpp`).
+`hvf-probe --apic-run` proves it: with IRQ0 redirected to vector `0x30`, the guest exits at the
+handler RIP `0x1200` instead of the entry HLT at `0x1000`. The bug that hid this was the
+`hv_ioapic_state_ext_t` offset (`+8`, not `+4`), fixed and confirmed on the installed kext.
+
+What is *not* covered: the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's
+userspace layer, and thread-13 state read/write calls are accepted as no-ops rather than fully
+emulated. So the API surface is now almost entirely accepted, but full APIC semantics are not
+claimed.
 
 ---
 
