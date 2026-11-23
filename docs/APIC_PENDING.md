@@ -54,10 +54,14 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
    optionally confirm `hvf-probe --apic` shows no `HV_ERROR` besides the five `exit_*` helpers.
 2. **Five `hv_vcpu_exit_*` helpers** answer `HV_ERROR` and never reach a trap. They are answered by
    Apple's userspace layer; no kext-side fix is known yet.
-3. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
+4. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
    a guest reading/writing `0xFEE00000` directly is not intercepted. EOI is likewise not handled, so
    an ISR bit set by injection stays set until `put_state` replaces the model.
-4. **PR #5** is still open; nothing here is claimed as full compatibility.
+   `kext/Source/ApicMmio.hpp` + `tests/apic_mmio_test.cpp` now decode the two MOV forms a guest uses
+   for absolute APIC accesses (`8B 05 <disp32>` read, `89 05 <disp32>` write). Wiring them into the
+   NPF path still needs a GPA→host-buffer read helper and an EOI path; until then NPF exits go to the
+   client as before.
+5. **PR #5** is still open; nothing here is claimed as full compatibility.
 
 ## Why no more reboot was requested
 

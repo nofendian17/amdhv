@@ -52,6 +52,8 @@ test: | $(BUILD)
 	$(BUILD)/tsc_offset_test
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/apic_test tests/apic_test.cpp
 	$(BUILD)/apic_test
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -o $(BUILD)/apic_mmio_test tests/apic_mmio_test.cpp
+	$(BUILD)/apic_mmio_test
 
 tools: | $(BUILD)
 	$(CC) -arch x86_64 -Wall -Wextra -O2 -o $(BUILD)/amd-info tools/amd-info/main.c \
