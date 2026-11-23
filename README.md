@@ -89,6 +89,8 @@ Everything else is on by default or diagnostics only. Do not add more unless tro
 | `amdhv_hv=1` | **required** — registers the Hypervisor.framework trap tables |
 | `amdhv_hv_sysctl=0` | optional — leaves `kern.hv_support` alone (default: set it to 1) |
 | `amdhv_tpr_shadow=0` | optional — hides the TPR shadow from guests (default: offered) |
+| `amdhv_apic=1` | optional — accepts `hv_vm_create(HV_VM_ACCEL_APIC)` and enables the in-kernel APIC path (default: off) |
+| `amdhv_asid=0` | optional — disables per-vCPU ASIDs and uses ASID 0 with full TLB flushes (default: on) |
 | `amdhv_selftest=1` | diagnostics — verify SVM state after enable and after wake |
 | `amdhv_loglevel=N` / `amdhv_iolog=N` | diagnostics — log levels, also settable with `amd-info level N` |
 | `-amdhv_off` | **emergency** — kext loads but does nothing |
