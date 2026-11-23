@@ -17,7 +17,7 @@ Each row is marked with evidence, not intent. Status meanings:
 | **n/a** | Not applicable to this design. |
 
 Baseline used for this revision (2026-11-23, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
-AMDHV 0.2.0 + Phase 1/3): `make test` passes all 17 tests, `hvf-probe` prints `64 of 64` vCPUs with
+AMDHV 0.2.0 + Phase 1/3): `make test` passes all 18 tests, `hvf-probe` prints `64 of 64` vCPUs with
 `run_until(past deadline)` in microseconds, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
 `enableFailures`, `vmInvalidExits`, `assertFailures` and `vmFpuMismatches` at 0. Re-run those four
 after every change; a checklist row without evidence is a hypothesis. `amd-info info` reports 32768
@@ -235,7 +235,7 @@ a kext trap of its own.
 
 The two Phase 1 changes are live-verified on the installed kext (UUID
 `D7CA29BF-7FA7-3C02-89EA-C22F24539562`): `hvf-probe --matrix` now shows the TSC offset at `0x1000`
-after a guest run and `set_shadow_access` answering `ok`. `make test` is 17/17, `hvf-smoke` passes,
+after a guest run and `set_shadow_access` answering `ok`. `make test` is 18/18, `hvf-smoke` passes,
 and `vmInvalidExits`, `assertFailures`, `enableFailures` and `vmFpuMismatches` stayed at zero.
 
 ### 3.5 Phase 3, slices 1–3: APIC foundation and trap decoding
@@ -398,7 +398,7 @@ API surface changes) + one client run + `amd-info stats` with `vmInvalidExits` a
 ## 6. Verification commands
 
 ```bash
-make test                    # 15 host tests
+make test                    # 18 host tests
 make kext tools              # build/AMDHV.kext, amd-info, hvf-smoke, hvf-probe
 
 sudo build/amd-info          # SVM state on every CPU

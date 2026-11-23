@@ -339,9 +339,9 @@ the call return `ok`, and `hvf-probe --apic` exercised all 32 APIC calls under s
 A trap-log capture decoded task trap 10's op codes (`0x6a`–`0x7a` for LAPIC/IOAPIC/AT-PIC and bus
 frequency) and task 11's `(data << 32) | addr` MSI argument. Task traps 10/11 are now wired to the
 register model, and thread trap 13 accepts the ten per-vCPU sub-ops as no-ops after decoding their
-block codes. On the latest installed kext, 27 of the 32 APIC calls answer `ok`; the five
+block codes. On the installed kext, `--apic` shows 31 `ok` answers; the five
 `hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's userspace layer. IOAPIC get/put state
-used the wrong word of the arg block and is fixed in this tree, pending a reboot to confirm.
+used the wrong word of the arg block; the fix is live-verified (both calls answer `ok`).
 
 The guest path is now live-verified with `hvf-probe --apic-run`: a real-mode guest with an IVT entry
 for vector `0x30` and an IOAPIC redirect from IRQ0 exits with RIP `0x1200` (the handler), not the

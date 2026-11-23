@@ -16,7 +16,7 @@ argument decoder, which is present but unverified.
 | Guest interrupt delivery | `--apic-run`: IRQ0 → vector `0x30`, guest exits at handler RIP `0x1200` |
 | SMAP panic | caused by `memcpy` to a user pointer in get_state; fixed with `copyout`/`copyin` via a kernel buffer |
 | Failures after last reboot | `vmInvalidExits`, `assertFailures`, `enableFailures`, `vmFpuMismatches` = 0 |
-| Full probe | `79 of 79`, `hvf-smoke` `PASS`, `make test` 17/17 |
+| Full probe | `79 of 79`, `hvf-smoke` `PASS`, `make test` 18/18 |
 
 ## Decoded thread-13 wire format
 
