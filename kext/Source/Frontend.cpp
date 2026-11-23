@@ -1319,10 +1319,20 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     const unsigned code = (unsigned)w[0] & 0xFFFF;
     const user_addr_t p1 = (user_addr_t)(w[1] >> 8), p2 = (user_addr_t)(w[2] >> 8),
                       p3 = (user_addr_t)(w[3] >> 8);
+    /* p2/p3 are pointers to pointers: the first word holds a user address whose low half the old
+     * single deref returned as a bogus "offset" (0xb9814d80). Follow both levels. */
+    auto arg4 = [](user_addr_t slot, uint64_t *out) -> int {
+        user_addr_t inner = 0;
+        return copyin(slot, &inner, sizeof(inner)) ? 1 : copyin(inner, out, 4);
+    };
+    auto arg8 = [](user_addr_t slot, uint64_t *out) -> int {
+        user_addr_t inner = 0;
+        return copyin(slot, &inner, sizeof(inner)) ? 1 : copyin(inner, out, 8);
+    };
     switch (code) {
     case 0x8001: {                                   /* apic_read: result, offset */
         uint64_t off = 0;
-        const int e = copyin(p2, &off, 4);
+        const int e = arg4(p2, &off);
         static volatile SInt32 logged;
         if (OSIncrementAtomic(&logged) < 8)
             AMDHV_INFO("hv front end: apic_read p1=%#llx p2=%#llx p3=%#llx off=%#llx e=%d",
@@ -1334,7 +1344,7 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     }
     case 0x8002: {                                   /* apic_write: no-side-effect, offset, value */
         uint64_t off = 0, val = 0;
-        const int e1 = copyin(p2, &off, 4), e2 = copyin(p3, &val, 4);
+        const int e1 = arg4(p2, &off), e2 = arg4(p3, &val);
         static volatile SInt32 logged2;
         if (OSIncrementAtomic(&logged2) < 8)
             AMDHV_INFO("hv front end: apic_write p1=%#llx p2=%#llx p3=%#llx off=%#llx val=%#llx e=%d/%d",
@@ -1362,7 +1372,7 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     }
     case 0x0006: {                                   /* apic_ctrl: controls pointer */
         uint64_t ctrls = 0;
-        if (p1 && copyin(p1, &ctrls, 8) == 0)
+        if (p1 && arg8(p1, &ctrls) == 0)
             v->lapic.apic_controls = ctrls;
         return kHvOk;
     }
