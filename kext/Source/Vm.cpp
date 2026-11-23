@@ -12,6 +12,7 @@
 #include "Log.hpp"
 #include "SVM.hpp"
 #include "Vm.hpp"
+#include "ApicMmio.hpp"
 
 #define super OSObject
 
@@ -486,6 +487,35 @@ uint32_t com_amdhv_AMDHVVmShared::spacePerm(uint32_t space, uint64_t gpa)
     return perm;
 }
 
+/* Copy a guest-physical range out of the pinned backing descriptor. Caller holds the rw lock;
+ * the read lock is recursive here, as in spacePerm(). */
+bool com_amdhv_AMDHVVmShared::guestBytes(uint32_t space, uint64_t gpa, void *dst, size_t n)
+{
+    bool ok = false;
+    IORWLockRead(fRw);
+    amdhv::npt::Table *table = tableFor(space);
+    if (table) {
+        uint64_t hpa = 0;
+        Backing *b = static_cast<Backing *>(table->lookup(gpa, &hpa, nullptr));
+        if (b && b->md) {
+            const IOByteCount total = b->md->getLength();
+            for (IOByteCount cursor = 0; cursor < total;) {
+                IOByteCount seg = 0;
+                addr64_t pa = b->md->getPhysicalSegment(cursor, &seg, kIOMemoryMapperNone);
+                if (!pa || !seg)
+                    break;
+                if (hpa >= pa && hpa < pa + seg) {
+                    ok = b->md->readBytes(cursor + (hpa - pa), dst, n) == n;
+                    break;
+                }
+                cursor += seg;
+            }
+        }
+    }
+    IORWLockUnlock(fRw);
+    return ok;
+}
+
 bool com_amdhv_AMDHVVmShared::spaceInUse(uint32_t space)
 {
     bool used = false;
@@ -692,6 +722,8 @@ bool com_amdhv_AMDHVVm::init()
     fKick          = 0;
     fHasTscAux     = false;
     fTscNative     = false;
+    fApicAccel     = false;
+    fApicLapic     = nullptr;
     fForceTlbFlush = 0;
     fTlbGenSeen    = 0;           /* 0 != fTlbGen (starts at 1): the first run flushes */
     fSleepEpoch    = svm::sleepEpoch();
@@ -1290,6 +1322,47 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         /* The injection was either delivered or is reported in exitIntInfo; do not let it fire a second time. */
         v->control.eventInj    = 0;
         v->control.eventInjErr = 0;
+
+        /*
+         * In-kernel APIC: a guest that accesses its LAPIC through memory faults on the unmapped
+         * 0xFEE00000 page. If the instruction is one of the two absolute MOV forms and its address
+         * is exactly the faulting GPA, serve it from the model and resume the guest. Anything else
+         * (a different decode, a paged RIP we could not read) still goes to the userspace VMM.
+         */
+        if (fApicAccel && fApicLapic && code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1)) {
+            const uint64_t fault = v->control.exitInfo2;
+            const uint32_t off = amdhv::apic::mmioOffset(fault, 0xFEE00000ull);
+            if (off != 0xFFFFFFFFu) {
+                uint8_t insn[6] = {0};
+                if (fShared->guestBytes(fSpace, v->save.rip, insn, sizeof(insn))) {
+                    const amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(insn, sizeof(insn));
+                    if (op.valid && op.disp == fault) {
+                        uint64_t rax = v->save.rax;   /* VMCB.Save is packed: never take its address */
+                        uint64_t *reg = op.reg == 0 ? &rax : nullptr;
+                        switch (op.reg) {
+                        case 1: reg = &fGprs.rcx;  break;
+                        case 2: reg = &fGprs.rdx;  break;
+                        case 3: reg = &fGprs.rbx;  break;
+                        case 5: reg = &fGprs.rbp;  break;
+                        case 6: reg = &fGprs.rsi;  break;
+                        case 7: reg = &fGprs.rdi;  break;
+                        default: break;              /* RSP: never used for APIC registers */
+                        }
+                        if (reg) {
+                            if (op.isWrite)
+                                amdhv::apic::writeReg(*fApicLapic, off, (uint32_t)*reg);
+                            else
+                                *reg = amdhv::apic::readReg(*fApicLapic, off);
+                            if (op.reg == 0)
+                                v->save.rax = rax;
+                            v->save.rip += op.length;
+                            fHaveNextRip = false;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
 
         /*
          * MSR_IA32_SPEC_CTRL (0x48) and MSR_IA32_PRED_CMD (0x49) are Intel-only: the AMD CPU has no

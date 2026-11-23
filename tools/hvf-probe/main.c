@@ -679,6 +679,45 @@ static void probeApicRun(void)
     munmap(ram, RAM_SIZE);
 }
 
+/* Guest-side LAPIC MMIO: MOV EAX,[0xFEE00080] then HLT. The model's TPR is set to 0x55 first,
+ * so an in-kernel NPF emulation returns 0x55 in EAX and resumes at the HLT (0x1006). */
+static void probeApicMmio(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) { perror("mmap"); return; }
+    memset(ram, 0, RAM_SIZE);
+    ram[0x1000] = 0x8B; ram[0x1001] = 0x05;
+    ram[0x1002] = 0x80; ram[0x1003] = 0x00; ram[0x1004] = 0xE0; ram[0x1005] = 0xFE;
+    ram[0x1006] = 0xF4;                       /* HLT after the emulated load */
+
+    hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
+    line("hv_vm_create(HV_VM_ACCEL_APIC)", r);
+    if (r != HV_SUCCESS) { munmap(ram, RAM_SIZE); return; }
+    line("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    line("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) { hv_vm_destroy(); munmap(ram, RAM_SIZE); return; }
+    setupControls(v);
+    setupRealMode(v, 0x1000);
+
+    hv_apic_state_ext_t apic = { 0 };
+    line("apic get_state (setup)", hv_vcpu_apic_get_state(v, &apic));
+    apic.state.tpr = 0x55;
+    line("apic put_state (setup)", hv_vcpu_apic_put_state(v, &apic));
+
+    r = hv_vcpu_run(v);
+    uint64_t rip = 0, rax = 0;
+    hv_vmx_vcpu_read_vmcs(v, VMCS_GUEST_RIP, &rip);
+    hv_vcpu_read_register(v, HV_X86_RAX, &rax);
+    printf("  %-52s %s, exit %" PRIu64 ", RIP %#" PRIx64 ", EAX %#" PRIx64 " (%s)\n",
+           "guest MOV EAX,[LAPIC TPR]", hvName(r), rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF,
+           rip, rax, rip == 0x1006 && rax == 0x55 ? "emulated" : "client NPF");
+    hv_vcpu_destroy(v);
+    hv_vm_destroy();
+    munmap(ram, RAM_SIZE);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -715,6 +754,10 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && strcmp(argv[1], "--apic-run") == 0) {
         probeApicRun();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--apic-mmio") == 0) {
+        probeApicMmio();
         return 0;
     }
 
