@@ -648,17 +648,26 @@ static void probeApicRun(void)
     hv_ioapic_state_ext_t io = { 0 };
     r = hv_vm_ioapic_get_state(&io);
     line("ioapic get_state (setup)", r);
+    printf("  %-52s %#llx\n", "  (rtbl0 before)", (unsigned long long)io.state.rtbl[0]);
     if (r == HV_SUCCESS) {
         io.state.rtbl[0] = 0x30;              /* vector 0x30, unmasked, physical destination */
         io.state.ioregsel = 0x10;
         line("ioapic put_state (setup)", hv_vm_ioapic_put_state(&io));
     }
+    hv_ioapic_state_ext_t check = { 0 };
+    if (hv_vm_ioapic_get_state(&check) == HV_SUCCESS)
+        printf("  %-52s %#llx, irr %#x\n", "  (rtbl0 readback)", (unsigned long long)check.state.rtbl[0],
+               check.state.irr);
     line("ioapic assert_irq(0)", hv_vm_ioapic_assert_irq(0));
     r = hv_vcpu_run(v);
     const uint64_t reason = rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF;
     const uint64_t rip = rvmcs(v, VMCS_GUEST_RIP);
     printf("  %-52s %s, exit %" PRIu64 ", RIP %#" PRIx64 " (%s)\n", "guest run with IRQ0 pending",
            hvName(r), reason, rip, rip == 0x1200 ? "handler reached" : "entry HLT");
+    hv_ioapic_state_ext_t after = { 0 };
+    if (hv_vm_ioapic_get_state(&after) == HV_SUCCESS)
+        printf("  %-52s %#llx, irr %#x\n", "  (state after run)", (unsigned long long)after.state.rtbl[0],
+               after.state.irr);
     hv_vcpu_destroy(v);
     hv_vm_destroy();
     munmap(ram, RAM_SIZE);

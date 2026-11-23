@@ -1281,12 +1281,12 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
                   if (OSIncrementAtomic(&ioLogged) < 4)
                       AMDHV_INFO("hv front end: IOAPIC get_state a=%#llx b=%#llx", (unsigned long long)x.a,
                                  (unsigned long long)x.b);
-                 if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 4, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
+                 if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
     case 0x72: { static volatile SInt32 ioLogged2;
                  if (OSIncrementAtomic(&ioLogged2) < 4)
                      AMDHV_INFO("hv front end: IOAPIC put_state a=%#llx b=%#llx", (unsigned long long)x.a,
                                 (unsigned long long)x.b);
-                 if (copyin((user_addr_t)x.a + 4, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
+                 if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
     case 0x73: if ((x.b & 0x10000u) == 0 && vm->vcpu[0])
                    amdhv::apic::setIrr(vm->vcpu[0]->lapic, (unsigned)(x.b & 0xFF)); break;
     case 0x6a: break;                       /* vcpu/vector are in a nested block; logged, not delivered yet */
