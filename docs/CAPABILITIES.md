@@ -98,8 +98,8 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | API | AMDHV | Notes |
 | --- | --- | --- |
 | `hv_vm_create` | yes | one VM per task; `HV_VM_ACCEL_APIC` is refused with `HV_UNSUPPORTED` |
-| `hv_vm_destroy` | yes | `HV_BUSY` while a vCPU or a trap still holds the VM |
-| `hv_vm_map` / `unmap` / `protect` | yes | map/protect require 4 KiB-aligned ranges; unmap accepts sub-page ranges and rounds them to page boundaries |
+| `hv_vm_destroy` | yes | refused while a vCPU or a trap still holds the VM; a live vCPU makes the client answer `HV_ERROR`, and the call succeeds after the last `hv_vcpu_destroy` |
+| `hv_vm_map` / `unmap` / `protect` | yes | map/protect require 4 KiB-aligned ranges, and one map is capped at 16 GiB (`AMDHV_MAP_MAX_SIZE`); unmap accepts sub-page ranges and rounds them to page boundaries |
 | `hv_vm_sync_tsc` | yes | handed to vCPUs created later too |
 | `hv_vm_space_create` / `map_space` / `protect_space` / `unmap_space` / `space_destroy` | yes | up to 64 extra address spaces, each with its own NPT root; `space_destroy` answers `HV_BUSY` while a vCPU is bound to it |
 | `hv_vm_add_pio_notifier` / `remove` | no | stubs; VZ uses I/O exits instead |
