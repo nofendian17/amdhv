@@ -1323,7 +1323,12 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
      * single deref returned as a bogus "offset" (0xb9814d80). Follow both levels. */
     auto arg4 = [](user_addr_t slot, uint64_t *out) -> int {
         user_addr_t inner = 0;
-        return copyin(slot, &inner, sizeof(inner)) ? 1 : copyin(inner, out, 4);
+        const int e = copyin(slot, &inner, sizeof(inner));
+        static volatile SInt32 logged;
+        if (e == 0 && OSIncrementAtomic(&logged) < 12)
+            AMDHV_INFO("hv front end: apic arg slot=%#llx inner=%#llx", (unsigned long long)slot,
+                       (unsigned long long)inner);
+        return e ? 1 : copyin(inner, out, 4);
     };
     auto arg8 = [](user_addr_t slot, uint64_t *out) -> int {
         user_addr_t inner = 0;
