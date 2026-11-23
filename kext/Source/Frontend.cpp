@@ -18,6 +18,7 @@
 #include "KernelDecls.hpp"
 #include "Vm.hpp"
 #include "VmcsCaps.hpp"
+#include "TscOffset.hpp"
 #include "Log.hpp"
 
 /*
@@ -70,7 +71,7 @@ const char *const kTaskNames[kTraps] = {
     "add_pio_notifier", "rem_pio_notifier", "intctl(atpic/ioapic/lapic)", "lapic_msi", "vcpu_create", "vcpu_interrupt", "?14", "?15"};
 const char *const kThreadNames[kTraps] = {
     "vcpu_run", "vcpu_run_until", "invalidate_tlb", "enable_managed_msr", "disable_managed_msr", "vcpu_attach/destroy",
-    "set_space", "read_vmcs(slot)", "?8", "set_apic_address", "set_msr_access", "sync_special_regs", "get_cap_write_vmcs",
+    "set_space", "read_vmcs(slot)", "set_shadow_access", "set_apic_address", "set_msr_access", "sync_special_regs", "get_cap_write_vmcs",
     "apic(sub-op)", "?14", "?15"};
 
 /*
@@ -123,6 +124,7 @@ constexpr uint32_t kCacheSlots = 93;                             /* slots 0..92 
 constexpr uint32_t kRwMsrVal = 0x7d0, kRwMsrValid = 0xc50;      /* cache of MSR values by index, and its valid bitmap (3 words) */
 constexpr uint32_t kRoMsrPos = 0x58;                              /* ro: one byte per MSR index, position in the managed list, 0xff = not managed */
 constexpr uint32_t kRwValid = 0x2f0, kRwDirty = 0x300, kRwRegs = 0xc80;   /* valid and dirty bitmaps (2 words each), the register array */
+constexpr uint32_t kRwTscRelative = 0xc78;                       /* hv_vcpu_set_tsc_relative value, applied when flag 0x100 is set */
 constexpr uint32_t kRoSynced = 0xe8, kRoCapMin = 0xf1, kRoCapMax = 0x3d9, kRoCapValid = 0x6c1;   /* ro slice (the arrays are unaligned) */
 constexpr uint32_t kInfoBytes = 0x118;
 
@@ -802,10 +804,20 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         if (fr != kIOReturnSuccess)
             AMDHV_INFO("hv front end: FP state/XCR0 refused by the core (0x%x), xcr0 %#llx", fr, (unsigned long long)f->xcr0);
     }
-    if (flags & 0x100) {
-        static volatile SInt32 tscLogged;
-        if (OSIncrementAtomic(&tscLogged) < 3)
-            AMDHV_INFO("hv front end: a TSC write through hv_vcpu_write_msr(0x10) is not applied yet (hv_vm_sync_tsc is)");
+    /* hv_vcpu_set_tsc_relative: the framework records the requested value in the rw slice and sets
+     * flag 0x100. The guest must read hv_tsc_clock() + value, and hv_tsc_clock() is rdtsc plus the
+     * commpage's (adjust - base), so both terms go into the VMCB TSC offset. */
+    if (flags & amdhv::tsc::kRelativeFlag) {
+        const volatile uint64_t *comm = reinterpret_cast<const volatile uint64_t *>(v->vm->kva[2]);
+        const uint64_t rel = *reinterpret_cast<const uint64_t *>(v->rw + kRwTscRelative);
+        const uint64_t off = amdhv::tsc::guestOffset(comm[0], comm[1], rel);
+        IOReturn tr = cpu->vmcsWrite(0x2010, off);
+        if (tr != kIOReturnSuccess) {
+            static volatile SInt32 tscLogged;
+            if (OSIncrementAtomic(&tscLogged) < 3)
+                AMDHV_INFO("hv front end: TSC offset %#llx refused by the core (0x%x)", (unsigned long long)off,
+                         (unsigned)tr);
+        }
     }
     /* Debug registers (DR7 is a slot and went with the others). */
     if (flags & 0x40) {
@@ -1178,6 +1190,15 @@ kern_return_t tSetApicAddress(void *target, uint64_t arg)
     return target ? kHvOk : kHvNoDev;
 }
 
+/* hv_vmx_vcpu_set_shadow_access (thread trap 8): shadow-VMCS access bits have no SVM equivalent.
+ * read/write_shadow_vmcs already round-trip in the framework's client-side area, so answer success
+ * as a compatibility no-op, like the APIC address above. */
+kern_return_t tSetShadowAccess(void *target, uint64_t arg)
+{
+    note(HV_THREAD_TRAP, 8, arg);
+    return target ? kHvOk : kHvNoDev;
+}
+
 template <unsigned Type, unsigned Index>
 kern_return_t stub(void *target, uint64_t arg)
 {
@@ -1195,10 +1216,10 @@ const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, tVmSpaceCreate, tVm
                                       tVmSyncTsc, S(0, 8), S(0, 9), S(0, 10), S(0, 11), tVcpuCreate, tVcpuInterrupt, S(0, 14),
                                       S(0, 15)};
 /* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 5
- * vcpu_destroy, 6 set address space, 7 read slot, 10 set_msr_access, 11 sync special regs, 12 capability of a writable
- * slot are real. */
+ * vcpu_destroy, 6 set address space, 7 read slot, 8 set shadow access (no-op), 9 set APIC address (no-op),
+ * 10 set_msr_access, 11 sync special regs, 12 capability of a writable slot are real. */
 const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy,
-                                        tSetSpace, tReadSlot, S(1, 8), tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite,
+                                        tSetSpace, tReadSlot, tSetShadowAccess, tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite,
                                         S(1, 13), S(1, 14), S(1, 15)};
 #undef S
 

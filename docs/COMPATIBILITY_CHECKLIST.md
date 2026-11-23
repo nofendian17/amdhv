@@ -62,7 +62,7 @@ Hypervisor.framework headers gives three separate verdicts:
 | --- | --- | --- |
 | SVM mechanisms needed to run the HVF clients listed in section 4 | **Yes**, with the caveats in 2.1 | VMRUN/VMSAVE/VMLOAD and GIF discipline (`SvmRun.S`), intercepts, NPT, event injection, ASID/TLB and clean-bit policy (`Vm.cpp`, `VmcsState.hpp`), all exercised by `hvf-smoke`, VZ and `hvf-probe` with `vmInvalidExits = 0` |
 | Every feature described by APM Vol. 2 Ch. 15 / App. B | **No** | The accelerator and isolation features in the table below have no CPUID probe, no enabling VMCB control write and no run path; several cannot be reached from Hypervisor.framework at all |
-| Public x86 Hypervisor.framework surface | **Partial** | 32 trap slots: 22 real handlers, 10 logging stubs that answer `HV_UNSUPPORTED`. The in-kernel APIC, IOAPIC, LAPIC, MSI and PIO-notifier families are refused; the rest of the SDK surface is either a shared-page helper (no trap) or has no handler/probe result and is not claimed |
+| Public x86 Hypervisor.framework surface | **Partial** | 32 trap slots: 23 real handlers, 9 logging stubs that answer `HV_UNSUPPORTED`. The in-kernel APIC, IOAPIC, LAPIC, MSI and PIO-notifier families are refused; the rest of the SDK surface is either a shared-page helper (no trap) or a deliberate compatibility no-op |
 
 The older 33047 manual linked in the original goal is the 2005 *Secure Virtual Machine
 Architecture Reference Manual*: its equivalent material is Chapter 2 and Appendix C, not
@@ -156,9 +156,10 @@ task/thread targets). Indices are the framework's, not ours. A **stub** is logge
 The macOS 15.8 x86 SDK declares 78 `hv_return_t` functions plus `hv_tsc_clock`. They do not map
 1:1 onto the 32 trap slots: register/MSR/VMCS/F-state access and the exec/idle/exit-info queries
 read or write the shared pages, so many calls need no trap at all. The slots below split into
-**22 real handlers** (task 0–7 and 12–13, thread 0–7 and 9–12) and **10 stubs** (task 8–11 and
-14–15, thread 8 and 13–15). The tables record trap-level coverage; section 3.4 records SDK
-functions that are neither handled nor probed.
+**23 real handlers** (task 0–7 and 12–13, thread 0–12) and **9 stubs** (task 8–11 and
+14–15, thread 13–15). The tables record trap-level coverage; section 3.4 records the measured
+SDK surface. The thread-8 (`set_shadow_access`) handler and the TSC-relative path in this tree are
+new code: they need a kext install and reboot before the live matrix changes.
 
 ### 3.1 Task traps
 
@@ -191,7 +192,7 @@ functions that are neither handled nor probed.
 | 5 | `hv_vcpu_destroy` | **Yes** | Frees the VMCB, host VMCB, bitmaps and FPU areas |
 | 6 | `hv_vcpu_set_space` | **Yes** | The trap argument is the raw space ID (verified); rebinds `nCR3` to that space's NPT root and flushes the vCPU's ASID |
 | 7 | `hv_vmx_vcpu_read_vmcs` (slot) | **Yes** | Reads from the VMCS shadow, fills the client's cache slot |
-| 8 | unused | **n/a** | Stub |
+| 8 | `hv_vmx_vcpu_set_shadow_access` | **Yes** | New no-op success; no shadow VMCS on SVM, but `read/write_shadow_vmcs` round-trip in the framework's client-side area |
 | 9 | `hv_vmx_vcpu_set_apic_address` | **Yes** | No-op success; the TPR is kept in `V_TPR`, the page is never read |
 | 10 | `hv_vcpu_set_msr_access` | **Yes** | Toggles MSRPM read/write intercepts |
 | 11 | sync special registers | **Yes** | DR0–DR7 and other special registers synchronised on demand |
@@ -221,9 +222,9 @@ there is no longer an "unverified" bucket. The line-by-line output is in
 | Group | Functions | Measured answer | Reading |
 | --- | --- | --- | --- |
 | Capability / clock | `hv_capability`, `hv_tsc_clock` | `ok` (`VCPUMAX=64`), monotonic value | real, framework-side |
-| TSC offset | `hv_vcpu_set_tsc_relative` | `ok` but the VMCS TSC-offset read-back does not change | no-op on the AMD core; `hv_vm_sync_tsc` is the applied path |
+| TSC offset | `hv_vcpu_set_tsc_relative` | `ok` but the VMCS TSC-offset read-back does not change (0.2.0) | code now applies `rw+0xc78` plus the commpage delta on the next run; needs a kext install + reboot to show in the matrix |
 | Shadow VMCS | `hv_vmx_vcpu_read/write_shadow_vmcs` | `ok`, value round-trips | client-side store only; SVM has no shadow VMCS for the core to consume |
-| Shadow access | `hv_vmx_vcpu_set_shadow_access` | `HV_UNSUPPORTED` | no shadow VMCS to grant access to |
+| Shadow access | `hv_vmx_vcpu_set_shadow_access` | `HV_UNSUPPORTED` (0.2.0, thread trap 8 stub) | now a real no-op success handler; needs a kext install + reboot to show in the matrix |
 | MSR info / cap-write / APIC address space | `hv_vmx_get_msr_info`, `hv_vmx_vcpu_get_cap_write_vmcs`, `hv_vmx_vcpu_set_apic_address_space` | `ok` (`0` for `IA32_ARCH_CAPABILITIES`), `ok` (thread trap 12), `ok` (no-op like `set_apic_address`) | answers correctly, no extra SVM state needed |
 | APIC state / exit helpers | `hv_vm_atpic_*`, `hv_vm_ioapic_get_state/put_state/pulse_irq`, `hv_vm_send_ioapic_intr`, `hv_vm_set_apic_bus_freq`, `hv_vcpu_apic_ctrl/get_state/put_state/trigger_lvt/lsc_*`, `hv_vcpu_exit_init_ap`, `hv_vcpu_exit_startup_ap`, `hv_vcpu_exit_ioapic_eoi`, `hv_vcpu_exit_apic_access_read`, `hv_vcpu_exit_inject_excp` | `HV_UNSUPPORTED` or `HV_ERROR` | same refused in-kernel-APIC family; no change |
 
@@ -231,6 +232,11 @@ there is no longer an "unverified" bucket. The line-by-line output is in
 deprecated API. `hv_vcpu_write_fpstate` returns `ok`: it writes the shared FP area that the next run
 applies (`Frontend.cpp` reads flag `0x80` and calls `setFpu()` at lines 781–802). Neither name needs
 a kext trap of its own.
+
+The two rows marked "0.2.0" are the Phase 1 changes in this tree: `TscOffset.hpp` folds the
+framework's commpage delta into the VMCB TSC offset when flag `0x100` is set, and thread trap 8 is a
+real handler again. Both are host-tested and compile into `AMDHV.kext`; the live matrix still shows
+the old answers until that kext is installed and the machine is rebooted.
 
 ---
 

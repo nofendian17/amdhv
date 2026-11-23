@@ -227,12 +227,14 @@ Public x86 Hypervisor.framework API matrix (SDK macOS 15)
 
 Three `ok` answers need a careful reading before they become a compatibility claim:
 
-- `hv_vcpu_set_tsc_relative` succeeds but the VMCS TSC offset does not move, so the AMD core does
-  not apply it. `Frontend.cpp` still logs a TSC slot write as not applied; `hv_vm_sync_tsc` is the
-  supported path.
+- `hv_vcpu_set_tsc_relative` succeeded but the VMCS TSC offset did not move in 0.2.0: the framework
+  puts the relative value in `rw+0xc78` and sets flag `0x100`, and the front end only logged it.
+  This tree applies `commpage(adjust - base) + relative` to the VMCB offset on the next run
+  (`TscOffset.hpp`, host-tested); the live matrix changes after installing the kext and rebooting.
 - `hv_vmx_vcpu_read/write_shadow_vmcs` store and return the value in the framework's client-side
   area (the 0x1234 round-trip proves that), but SVM has no shadow VMCS for the core to consume.
-  `hv_vmx_vcpu_set_shadow_access` is honestly `HV_UNSUPPORTED`.
+  `hv_vmx_vcpu_set_shadow_access` answered `HV_UNSUPPORTED` from thread trap 8 in 0.2.0; this tree
+  turns that trap into a no-op success to match the read/write helpers. Same reboot caveat.
 - `hv_vmx_vcpu_set_apic_address_space` is a no-op success, like the already documented
   `hv_vmx_vcpu_set_apic_address`: the core keeps the TPR in `V_TPR` and never reads that page.
 
