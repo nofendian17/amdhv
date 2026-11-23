@@ -140,6 +140,8 @@ scripts/       EFI install, symbol check, legacy QEMU boot test
 docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
                CAPABILITIES.md (API matrix),
                COMPATIBILITY_CHECKLIST.md (enablement, SVM and HVF checklist, gap register),
+               APIC_PENDING.md (APIC wire format and open gaps), SHIPPING.md (release runbook),
+               (see also CHANGELOG.md in the repo root),
                DOCKER_DESKTOP.md, KIRI.md, COLIMA.md, VIRTUALBOX.md,
                ANDROID_STUDIO.md, QEMU.md
 ```
