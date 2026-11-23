@@ -22,6 +22,7 @@
 
 #include "../../include/AMDHVShared.h"
 #include "FpuState.hpp"
+#include "ApicState.hpp"
 #include "Npt.hpp"
 #include "SpacePool.hpp"
 #include "VmcsState.hpp"
@@ -83,6 +84,9 @@ public:
         uint64_t            live;
         IODirection         dir;      /* what prepare() was called with: complete() must use the same */
     };
+
+    /* Copy `n` bytes at guest physical `gpa` in `space` into `dst`. Caller holds rw(). */
+    bool guestBytes(uint32_t space, uint64_t gpa, void *dst, size_t n);
 
 private:
     bool     setup(task_t owner);
@@ -152,6 +156,15 @@ public:
     /* hv_vcpu_invalidate_tlb: flush this vCPU's guest TLB on its next entry. */
     void     forceTlbFlush() { __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE); }
 
+    /* A VM created with HV_VM_ACCEL_APIC gives us its per-vCPU LAPIC model for MMIO emulation. */
+    void     setApicModel(bool accel, amdhv::apic::LapicState *lapic,
+                          amdhv::apic::IoApicState *ioapic)
+    {
+        fApicAccel = accel;
+        fApicLapic = lapic;
+        fApicIoApic = ioapic;
+    }
+
     IOReturn getFpu(AMDHVFpuState *out);
     IOReturn setFpu(const AMDHVFpuState *in);
 
@@ -179,6 +192,9 @@ private:
     uint64_t                  fXcr0Supported;    /* CPUID.0xD.0 EDX:EAX */
     bool                      fHasTscAux;        /* the CPU has RDTSCP, so IA32_TSC_AUX */
     bool                      fTscNative;        /* the client asked for native MSR 0x10: run() emulates it in-kernel */
+    bool                      fApicAccel;        /* HV_VM_ACCEL_APIC: emulate APIC MMIO exits in-kernel */
+    amdhv::apic::LapicState  *fApicLapic;        /* owned by the front end's HvVcpu */
+    amdhv::apic::IoApicState *fApicIoApic;       /* owned by the front end's HvVm */
     uint32_t                  fFpuSize;
     volatile uint32_t         fKick;
     volatile uint32_t         fForceTlbFlush;    /* hv_vcpu_invalidate_tlb asked for a flush */

@@ -96,8 +96,9 @@ final value is:
 
 Only `amdhv_enable_svm=1 amdhv_hv=1` are AMDHV's own. The others are host-specific: `revcpu=1`
 helps AMD topologies, and `vsmchbkp=0` works around a Lilu/VirtualSMC `resetSystem` panic seen on
-this machine — it is not an AMDHV requirement. See the [boot-args table](../README.md#boot-args)
-for optional diagnostics flags.
+this machine — it is not an AMDHV requirement. Optional AMDHV flags such as `amdhv_apic=1`
+(in-kernel APIC) or `amdhv_asid=0` (no per-vCPU ASIDs) are not added by the installer; add them to
+the same `boot-args` string by hand when needed. See the [boot-args table](../README.md#boot-args).
 
 ## 5. Validate the plist before rebooting
 

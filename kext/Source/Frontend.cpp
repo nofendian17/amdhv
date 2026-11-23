@@ -18,6 +18,8 @@
 #include "KernelDecls.hpp"
 #include "Vm.hpp"
 #include "VmcsCaps.hpp"
+#include "TscOffset.hpp"
+#include "ApicState.hpp"
 #include "Log.hpp"
 
 /*
@@ -70,7 +72,7 @@ const char *const kTaskNames[kTraps] = {
     "add_pio_notifier", "rem_pio_notifier", "intctl(atpic/ioapic/lapic)", "lapic_msi", "vcpu_create", "vcpu_interrupt", "?14", "?15"};
 const char *const kThreadNames[kTraps] = {
     "vcpu_run", "vcpu_run_until", "invalidate_tlb", "enable_managed_msr", "disable_managed_msr", "vcpu_attach/destroy",
-    "set_space", "read_vmcs(slot)", "?8", "set_apic_address", "set_msr_access", "sync_special_regs", "get_cap_write_vmcs",
+    "set_space", "read_vmcs(slot)", "set_shadow_access", "set_apic_address", "set_msr_access", "sync_special_regs", "get_cap_write_vmcs",
     "apic(sub-op)", "?14", "?15"};
 
 /*
@@ -123,6 +125,7 @@ constexpr uint32_t kCacheSlots = 93;                             /* slots 0..92 
 constexpr uint32_t kRwMsrVal = 0x7d0, kRwMsrValid = 0xc50;      /* cache of MSR values by index, and its valid bitmap (3 words) */
 constexpr uint32_t kRoMsrPos = 0x58;                              /* ro: one byte per MSR index, position in the managed list, 0xff = not managed */
 constexpr uint32_t kRwValid = 0x2f0, kRwDirty = 0x300, kRwRegs = 0xc80;   /* valid and dirty bitmaps (2 words each), the register array */
+constexpr uint32_t kRwTscRelative = 0xc78;                       /* hv_vcpu_set_tsc_relative value, applied when flag 0x100 is set */
 constexpr uint32_t kRoSynced = 0xe8, kRoCapMin = 0xf1, kRoCapMax = 0x3d9, kRoCapValid = 0x6c1;   /* ro slice (the arrays are unaligned) */
 constexpr uint32_t kInfoBytes = 0x118;
 
@@ -138,6 +141,7 @@ volatile SInt32 gLiveVms = 0;
 /* The TPR shadow (VMX control bit 21) is offered to every VM: it lets Windows change its CR8 without a VM exit, which is most of the exits of
  * a Windows boot. On by default; the boot-arg amdhv_tpr_shadow=0 or `amd-info hv tpr 0` turns it off for the VMs created from then on. */
 volatile int gTprShadow = 1;
+volatile int gApicAccel = 0;                           /* amdhv_apic=1: let clients ask for hv_vm_create(HV_VM_ACCEL_APIC) */
 
 volatile int *gSupportPtr = nullptr;                 /* the kernel's hv_support_available once located and written */
 int gSupportSaved = 0;
@@ -164,6 +168,7 @@ struct HvVcpu {
     uint64_t tprPage;          /* the TPR word of the page as this driver last left it: the client's write is applied when it differs */
     bool     tprLogged;        /* the client's first TPR-shadow use is logged once */
     uint8_t  managedIdx[256];  /* position in the list -> MSR cache index, 0 = a hole */
+    amdhv::apic::LapicState lapic;  /* in-kernel APIC state of this vCPU */
     uint64_t applied[144];     /* the last value handed to the core for each MSR cache index */
     uint8_t  appliedKnown[144];
 };
@@ -179,7 +184,10 @@ struct HvVm {
     uint32_t roArrOff;                         /* offset of the per-vCPU 4 KiB pages (managed MSR lists) in the ro area */
     uint64_t tscOffset;                        /* from hv_vm_sync_tsc, handed to vCPUs created later */
     bool     tscValid;
+    bool     apicAccel;                        /* created with HV_VM_ACCEL_APIC (opt-in, see gApicAccel) */
     uint64_t caps[amdhv::vmx::CAP_COUNT];      /* the VMX capability words this VM's client was shown (HV_VMX_CAP_*), also what thread trap 12 answers from */
+    amdhv::apic::IoApicState ioapic;           /* in-kernel APIC state (opt-in VMs) */
+    amdhv::apic::AtpicState atpic[2];          /* primary and secondary 8259A */
     HvVcpu *vcpu[kMaxVcpus];
     uint32_t nVcpus;
 };
@@ -251,6 +259,9 @@ HvVm *vmCreate(uint64_t *info)
     HvVm *vm = (HvVm *)IOMallocZero(sizeof(HvVm));
     if (!vm)
         return nullptr;
+    amdhv::apic::reset(vm->ioapic);
+    amdhv::apic::reset(vm->atpic[0]);
+    amdhv::apic::reset(vm->atpic[1]);
     OSIncrementAtomic(&gLiveVms);                    /* balanced by vmFree, which every failure path below also reaches */
     vm->lock = IOLockAlloc();
     if (!vm->lock) {
@@ -336,12 +347,15 @@ kern_return_t tVmCreate(void *target, uint64_t arg)
     struct { uint64_t flags, info; } a = {0, 0};
     if (copyin((user_addr_t)arg, &a, sizeof(a)))
         return kHvError;
-    if (a.flags & 0x400)
-        return kHvUnsupportedCode;                   /* the in-kernel APIC variant */
+    if ((a.flags & 0x400) && !gApicAccel)
+        return kHvUnsupportedCode;              /* the in-kernel APIC variant is opt-in while its handlers are built */
     uint64_t info[kInfoBytes / 8];
     HvVm *vm = vmCreate(info);
     if (!vm)
         return kHvNoRes;
+    vm->apicAccel = (a.flags & 0x400) != 0;
+    if (vm->apicAccel)
+        AMDHV_INFO("hv front end: VM created with the in-kernel APIC requested");
     if (copyout(info, (user_addr_t)a.info, kInfoBytes)) {
         vmFree(vm);
         return kHvError;
@@ -406,6 +420,7 @@ kern_return_t tVcpuCreate(void *target, uint64_t arg)
         vmUnpin(vm);
         return kHvNoRes;
     }
+    amdhv::apic::reset(v->lapic);
     {
         amdhv::svm::rescan();       /* CPUs that came online after the kext started */
         AMDHVInfo info;
@@ -418,6 +433,7 @@ kern_return_t tVcpuCreate(void *target, uint64_t arg)
             vmUnpin(vm);
             return hvFromIoEarly(err);
         }
+        v->cpu->setApicModel(vm->apicAccel, &v->lapic, &vm->ioapic);
     }
     IOLockLock(vm->lock);
     unsigned id = 0;
@@ -802,10 +818,20 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         if (fr != kIOReturnSuccess)
             AMDHV_INFO("hv front end: FP state/XCR0 refused by the core (0x%x), xcr0 %#llx", fr, (unsigned long long)f->xcr0);
     }
-    if (flags & 0x100) {
-        static volatile SInt32 tscLogged;
-        if (OSIncrementAtomic(&tscLogged) < 3)
-            AMDHV_INFO("hv front end: a TSC write through hv_vcpu_write_msr(0x10) is not applied yet (hv_vm_sync_tsc is)");
+    /* hv_vcpu_set_tsc_relative: the framework records the requested value in the rw slice and sets
+     * flag 0x100. The guest must read hv_tsc_clock() + value, and hv_tsc_clock() is rdtsc plus the
+     * commpage's (adjust - base), so both terms go into the VMCB TSC offset. */
+    if (flags & amdhv::tsc::kRelativeFlag) {
+        const volatile uint64_t *comm = reinterpret_cast<const volatile uint64_t *>(v->vm->kva[2]);
+        const uint64_t rel = *reinterpret_cast<const uint64_t *>(v->rw + kRwTscRelative);
+        const uint64_t off = amdhv::tsc::guestOffset(comm[0], comm[1], rel);
+        IOReturn tr = cpu->vmcsWrite(0x2010, off);
+        if (tr != kIOReturnSuccess) {
+            static volatile SInt32 tscLogged;
+            if (OSIncrementAtomic(&tscLogged) < 3)
+                AMDHV_INFO("hv front end: TSC offset %#llx refused by the core (0x%x)", (unsigned long long)off,
+                         (unsigned)tr);
+        }
     }
     /* Debug registers (DR7 is a slot and went with the others). */
     if (flags & 0x40) {
@@ -861,6 +887,29 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         }
     }
 
+    /* In-kernel APIC: feed pending IRQs from the 8259A/IOAPIC models into this vCPU's LAPIC, then
+     * present the highest priority vector through the VM-entry event-injection field. The core's
+     * applyControls() turns that field into VMCB.eventInj; existing client injections win. */
+    if (v->vm->apicAccel) {
+        if (v->id == 0) {
+            for (unsigned p = 0; p < 2; p++) {
+                const unsigned vec = amdhv::apic::atpicPending(v->vm->atpic[p]);
+                if (vec)
+                    amdhv::apic::setIrr(v->lapic, vec);
+            }
+            const unsigned vec = amdhv::apic::pendingVector(v->vm->ioapic);
+            if (vec)
+                amdhv::apic::setIrr(v->lapic, vec);
+        }
+        uint64_t pending = 0;
+        const bool freeSlot = cpu->vmcsRead(0x4016, &pending) == kIOReturnSuccess && !(pending & (1ull << 31));
+        if (freeSlot) {
+            const unsigned vec = amdhv::apic::takeInterrupt(v->lapic);
+            if (vec)
+                cpu->vmcsWrite(0x4016, (1ull << 31) | vec);  /* external interrupt, no error code */
+        }
+    }
+
     /* 2. Run. */
     *validWord(v, 0) = 0;                              /* the guest changes things: nothing in the cache is trusted until refilled */
     *validWord(v, 1) = 0;
@@ -871,6 +920,8 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
      * interrupt and answers the guest's CR8 reads from it, so a write has to reach the core and read back (read<<4, write>>4). */
     {
         const uint64_t tpr = *gprWord(v, R_TPR);
+        if (v->vm->apicAccel)
+            v->lapic.tpr = (uint32_t)tpr;
         if (tpr != v->tprPage) {
             cpu->vmcsWrite(0xF004, (tpr >> 4) & 0xF);
             v->tprPage = tpr;
@@ -1178,6 +1229,124 @@ kern_return_t tSetApicAddress(void *target, uint64_t arg)
     return target ? kHvOk : kHvNoDev;
 }
 
+/* hv_vmx_vcpu_set_shadow_access (thread trap 8): shadow-VMCS access bits have no SVM equivalent.
+ * read/write_shadow_vmcs already round-trip in the framework's client-side area, so answer success
+ * as a compatibility no-op, like the APIC address above. */
+kern_return_t tSetShadowAccess(void *target, uint64_t arg)
+{
+    note(HV_THREAD_TRAP, 8, arg);
+    return target ? kHvOk : kHvNoDev;
+}
+
+/* hv_vm_atpic, hv_vm_ioapic, hv_vm_lapic and hv_vm_set_apic_bus_freq arrive as one task trap with a
+ * packed op code in the first word (the observed enum values are ASCII-ish sequential: 0x6a..0x7a).
+ * The state lives in the VM; delivery into the guest is a later slice. */
+struct ApicCtlArg { uint64_t op, a, b, c, d, e, f, g; };
+
+kern_return_t tIntCtl(void *target, uint64_t arg)
+{
+    note(HV_TASK_TRAP, 10, arg);
+    HvVm *vm = static_cast<HvVm *>(target);
+    if (!vm || !vmPin(vm))
+        return kHvNoDev;
+    ApicCtlArg x;
+    if (copyin((user_addr_t)arg, &x, sizeof(x))) {
+        vmUnpin(vm);
+        return kHvError;
+    }
+    const unsigned op = (unsigned)x.op & 0xFFFF;
+    amdhv::apic::AtpicState &pic = vm->atpic[(x.a >> 32) & 1];
+    const unsigned irq = (unsigned)x.a & 0xFF;
+    switch (op) {
+    case 0x74: if (irq < 8 && !(pic.mask & (1u << irq))) pic.request |= 1u << irq; break;
+    case 0x75: if (irq < 8) pic.request &= ~(1u << irq); break;
+    case 0x76: { uint8_t m = pic.mask; if (copyout(&m, (user_addr_t)x.b, 1)) { vmUnpin(vm); return kHvError; } break; }
+    case 0x77: pic.mask = (uint8_t)(x.a >> 32); break;
+    case 0x78: { uint32_t ver = 100;   /* HV_ATPIC_STATE_EXT_VER */
+                 if (copyout(&ver, (user_addr_t)x.b, 4) || copyout(&pic, (user_addr_t)x.b + 4, sizeof(pic))) { vmUnpin(vm); return kHvError; } break; }
+    case 0x79: if (copyin((user_addr_t)x.b + 4, &pic, sizeof(pic))) { vmUnpin(vm); return kHvError; } break;
+    case 0x6b: amdhv::apic::assertIrq(vm->ioapic, irq); break;
+    case 0x6c: amdhv::apic::deassertIrq(vm->ioapic, irq); break;
+    case 0x6d: amdhv::apic::assertIrq(vm->ioapic, irq); amdhv::apic::deassertIrq(vm->ioapic, irq); break;
+    case 0x6f: { uint32_t v = amdhv::apic::ioRead(vm->ioapic, vm->ioapic.ioregsel);
+                 if (copyout(&v, (user_addr_t)x.b, 4)) { vmUnpin(vm); return kHvError; } break; }
+    case 0x70: amdhv::apic::ioWrite(vm->ioapic, vm->ioapic.ioregsel, (uint32_t)x.b); break;
+    case 0x71: { uint32_t ver = 100;   /* HV_IOAPIC_STATE_EXT_VER */
+                  /* the state pointer is in a; b is a framework cookie; state begins at +8 */
+                  if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
+    case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break;
+    case 0x73: if ((x.b & 0x10000u) == 0 && vm->vcpu[0])
+                   amdhv::apic::setIrr(vm->vcpu[0]->lapic, (unsigned)(x.b & 0xFF)); break;
+    case 0x6a: break;                       /* vcpu/vector are in a nested block; logged, not delivered yet */
+    case 0x7a: break;                       /* APIC bus frequency: no timer emulation yet */
+    default: vmUnpin(vm); return kHvUnsupportedCode;
+    }
+    vmUnpin(vm);
+    return kHvOk;
+}
+
+/* hv_vm_lapic_msi packs (data << 32) | addr. MSI routing into the guest is a later slice. */
+kern_return_t tLapicMsi(void *target, uint64_t arg)
+{
+    note(HV_TASK_TRAP, 11, arg);
+    return target ? kHvOk : kHvNoDev;
+}
+
+/* Thread trap 13: per-vCPU APIC sub-ops. Pointer words are shifted left by 8; the low byte is a
+ * tag (0x8001 apic_read, 0x8002 apic_write, 3 put_state, 4 get_state) or a small code for
+ * ctrl/LVT/LSC. The SDK ext structs put state at +8 (after version and padding). */
+kern_return_t tApicSubOp(void *target, uint64_t arg)
+{
+    note(HV_THREAD_TRAP, 13, arg);
+    HvVcpu *v = static_cast<HvVcpu *>(target);
+    if (!v)
+        return kHvNoDev;
+    uint64_t w[4] = {0, 0, 0, 0};
+    if (copyin((user_addr_t)arg, w, sizeof(w)) != 0)
+        return kHvError;
+    const unsigned code = (unsigned)w[0] & 0xFFFF;
+    /* The result/flag pointer is w[1] >> 8. hv_vcpu_apic_read/write use a private, multiply
+     * indirect argument encoding: scanning client memory never shows the offset/value as plain
+     * words, so decoding it would be guesswork that costs a reboot per attempt. Accept the calls
+     * as compatibility no-ops (read returns zero) and keep the SDK-defined get/put state real. */
+    const user_addr_t out = (user_addr_t)(w[1] >> 8);
+    switch (code) {
+    case 0x8001: {                                   /* apic_read */
+        const uint32_t zero = 0;
+        return (out && copyout(&zero, out, 4)) ? kHvError : kHvOk;
+    }
+    case 0x8002: {                                   /* apic_write */
+        const uint8_t noSideEffect = 1;
+        return (out && copyout(&noSideEffect, out, 1)) ? kHvError : kHvOk;
+    }
+    case 0xe003:                                     /* put_state */
+    case 0x0003: {
+        uint8_t buf[8 + sizeof(amdhv::apic::LapicState)];
+        if (copyin((user_addr_t)(w[0] >> 8), buf, sizeof(buf)))
+            return kHvError;
+        return amdhv::apic::decodeState(v->lapic, buf) ? kHvOk : kHvError;
+    }
+    case 0xe004:                                     /* get_state */
+    case 0x0004: {
+        uint8_t buf[8 + sizeof(amdhv::apic::LapicState)];
+        amdhv::apic::encodeState(v->lapic, buf);
+        return copyout(buf, (user_addr_t)(w[0] >> 8), sizeof(buf)) ? kHvError : kHvOk;
+    }
+    case 0x0006:                                     /* apic_ctrl */
+        return kHvOk;
+    case 0x0107:                                     /* trigger_lvt */
+    case 0x0005:                                     /* LSC enter / invalidate */
+    case 0x0000:                                     /* inject_extint */
+        return kHvOk;
+    default: {
+        static volatile SInt32 logged;
+        if (OSIncrementAtomic(&logged) < 8)
+            AMDHV_INFO("hv front end: APIC subop %#llx unknown code %#x", (unsigned long long)arg, code);
+        return kHvUnsupportedCode;
+    }
+    }
+}
+
 template <unsigned Type, unsigned Index>
 kern_return_t stub(void *target, uint64_t arg)
 {
@@ -1192,14 +1361,14 @@ kern_return_t stub(void *target, uint64_t arg)
 /* Task traps: 0 vm_create, 1 vm_destroy, 2/3 space_create/destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc,
  * 12 vcpu_create, 13 vcpu_interrupt are real; the rest is logged and answered per mode. */
 const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, tVmSpaceCreate, tVmSpaceDestroy, tVmMap, tVmUnmap, tVmProtect,
-                                      tVmSyncTsc, S(0, 8), S(0, 9), S(0, 10), S(0, 11), tVcpuCreate, tVcpuInterrupt, S(0, 14),
+                                      tVmSyncTsc, S(0, 8), S(0, 9), tIntCtl, tLapicMsi, tVcpuCreate, tVcpuInterrupt, S(0, 14),
                                       S(0, 15)};
 /* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 5
- * vcpu_destroy, 6 set address space, 7 read slot, 10 set_msr_access, 11 sync special regs, 12 capability of a writable
- * slot are real. */
+ * vcpu_destroy, 6 set address space, 7 read slot, 8 set shadow access (no-op), 9 set APIC address (no-op),
+ * 10 set_msr_access, 11 sync special regs, 12 capability of a writable slot are real. */
 const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy,
-                                        tSetSpace, tReadSlot, S(1, 8), tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite,
-                                        S(1, 13), S(1, 14), S(1, 15)};
+                                        tSetSpace, tReadSlot, tSetShadowAccess, tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite,
+                                        tApicSubOp, S(1, 14), S(1, 15)};
 #undef S
 
 } // namespace
@@ -1387,6 +1556,9 @@ void start(com_amdhv_AMDHV *service)
     uint32_t tprArg = 1;
     if (PE_parse_boot_argn("amdhv_tpr_shadow", &tprArg, sizeof(tprArg)))
         gTprShadow = tprArg ? 1 : 0;
+    uint32_t apicArg = 0;
+    if (PE_parse_boot_argn("amdhv_apic", &apicArg, sizeof(apicArg)))
+        gApicAccel = apicArg ? 1 : 0;
     if (!PE_parse_boot_argn("amdhv_hv", &v, sizeof(v)) || v == 0)
         return;
     if (!setMode(v))
