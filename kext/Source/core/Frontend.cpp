@@ -24,7 +24,8 @@
 
 /*
  * Native mode: the kext registers itself with xnu as the hypervisor provider, in the place of Apple's AppleHV, so that
- * the unmodified Hypervisor.framework talks to this kext. See docs/NATIVE.md of the RyzenHV project this comes from.
+ * the unmodified Hypervisor.framework talks to this kext. This is native mode only: no userspace
+ * shim and no client patches, unlike the RyzenHV project this was ported from.
  *
  * The kernel side of the interface below is public (xnu osfmk/kern/hv_support_kext.h), the declarations are repeated
  * here so that the build does not depend on which private headers the SDK ships.

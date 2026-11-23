@@ -6,7 +6,7 @@
  * registers, then run it and handle exits by reading the VMCS exit reason. On a real Intel Mac the same binary runs
  * against Apple's framework; on a Hackintosh with AMD it runs through the AMDHV kext (native mode, boot-arg amdhv_hv=1):
  *
- *     sudo env DYLD_INSERT_LIBRARIES=build/libryzenhv.dylib ./build/hvf-smoke
+ *     sudo ./build/hvf-smoke
 
  *
  * It checks: the VMX capability path, controls, registers, MSRs, FPU state, serial output through I/O exits, CPUID,
@@ -226,7 +226,7 @@ int main(void)
     wvmcs(v, VMCS_CTRL_VMENTRY_CONTROLS, cap2ctrl(cap_entry, 0));
     wvmcs(v, VMCS_CTRL_EXC_BITMAP, 0);
     EXPECT((rvmcs(v, VMCS_CTRL_CPU_BASED) & CPU_BASED_HLT) != 0, "HLT exiting is on in the controls the capabilities allowed");
-    /* The TPR shadow is offered by default since 0.7.3 (`rhv-info hv tpr 0` or rhv_tpr_shadow=0 turns it off); when offered the helper above may set it, which is fine. */
+    /* The TPR shadow is offered by default (`amd-info hv tpr 0` or amdhv_tpr_shadow=0 turns it off); when offered the helper above may set it, which is fine. */
     EXPECT(((cap_proc >> 32) & CPU_BASED_TPR_SHADOW) || (rvmcs(v, VMCS_CTRL_CPU_BASED) & CPU_BASED_TPR_SHADOW) == 0, "TPR shadow: if it was not offered, it is not set");
 
     /* MSRs the guest kernel uses a lot, accessed natively. */
