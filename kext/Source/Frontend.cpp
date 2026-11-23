@@ -1322,13 +1322,22 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     /* p2/p3 are pointers to pointers: the first word holds a user address whose low half the old
      * single deref returned as a bogus "offset" (0xb9814d80). Follow both levels. */
     auto arg4 = [](user_addr_t slot, uint64_t *out) -> int {
-        user_addr_t inner = 0;
-        const int e = copyin(slot, &inner, sizeof(inner));
+        user_addr_t p = slot;
+        uint64_t v = 0;
         static volatile SInt32 logged;
-        if (e == 0 && OSIncrementAtomic(&logged) < 12)
-            AMDHV_INFO("hv front end: apic arg slot=%#llx inner=%#llx", (unsigned long long)slot,
-                       (unsigned long long)inner);
-        return e ? 1 : copyin(inner, out, 4);
+        for (unsigned level = 0; level < 5; level++) {
+            if (copyin(p, &v, sizeof(v)))
+                return 1;
+            if (OSIncrementAtomic(&logged) < 24)
+                AMDHV_INFO("hv front end: apic arg level%u %#llx -> %#llx", level,
+                           (unsigned long long)p, (unsigned long long)v);
+            if (v < 0x100000ull) {                    /* a small integer: the offset or value itself */
+                *out = v;
+                return 0;
+            }
+            p = (user_addr_t)v;
+        }
+        return 1;
     };
     auto arg8 = [](user_addr_t slot, uint64_t *out) -> int {
         user_addr_t inner = 0;
