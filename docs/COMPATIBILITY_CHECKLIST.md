@@ -16,8 +16,8 @@ Each row is marked with evidence, not intent. Status meanings:
 | **No** | Not implemented; the client gets `HV_UNSUPPORTED` or a no-op. |
 | **n/a** | Not applicable to this design. |
 
-Baseline used for this revision (2026-11-22, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
-AMDHV 0.1.2): `make test` passes all 15 tests, `hvf-probe` prints `64 of 64` vCPUs with
+Baseline used for this revision (2026-11-23, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
+AMDHV 0.2.0): `make test` passes all 15 tests, `hvf-probe` prints `64 of 64` vCPUs with
 `run_until(past deadline)` in `0.013 ms`, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
 `enableFailures`, `vmInvalidExits`, `assertFailures` and `vmFpuMismatches` at 0. Re-run those four
 after every change; a checklist row without evidence is a hypothesis. `amd-info info` reports 32768
@@ -40,7 +40,8 @@ ASIDs and features `0x0013bcff`, including `VmcbClean`, `FlushByAsid`, `PauseFil
 | Per-run re-check of `EFER.SVME` and `VM_HSAVE_PA` | **Yes** | `ensureThisCpu()` repairs drift before `VMRUN`; `healedCount()` counts it |
 | Self-test of every CPU | **Yes** | `verifyAll()`; `amd-info selftest` |
 | NPT and NRIPS required before a VM is created | **Yes** | `Vm.cpp` `com_amdhv_AMDHVVm::create()` refuses a CPU without both |
-| 64 logical CPUs / 64 vCPUs per VM | **Yes** | `AMDHV_MAX_CPUS`, `AMDHV_MAX_VCPUS_PER_VM` |
+| 64 vCPUs per VM | **Yes** | `AMDHV_MAX_VCPUS_PER_VM`; `hvf-probe` creates `64 of 64`, and the 65th is refused |
+| Per-CPU tables for 64 logical CPUs | **Partial** | `AMDHV_MAX_CPUS` sizes them for 64; this host exercises only 12, and a CPU with `cpu_number() >= 64` is skipped (section 7, limitation matrix) |
 | GIF discipline around the guest | **Yes** | `SvmRun.S`: `CLGI` … `STGI` around `VMSAVE`/`VMLOAD`/`VMRUN` |
 | Host interrupts during `VMRUN` | **Yes** | `STI` before `VMRUN` with `V_INTR_MASKING`; `CLI` after the exit |
 
@@ -117,7 +118,7 @@ task/thread targets). Indices are the framework's, not ours. A **stub** is logge
 | # | Call | Status | Notes |
 | --- | --- | --- | --- |
 | 0 | `hv_vm_create` | **Yes** | One VM per task; `HV_VM_ACCEL_APIC` is refused with `HV_UNSUPPORTED` |
-| 1 | `hv_vm_destroy` | **Yes** | `HV_BUSY` while a vCPU or an in-flight trap holds the VM |
+| 1 | `hv_vm_destroy` | **Yes** | Refused while a vCPU or an in-flight trap holds the VM; with a live vCPU the client sees `HV_ERROR` and the same call succeeds after the last `hv_vcpu_destroy` (observed 2026-11-23) |
 | 2 | `hv_vm_space_create` | **Yes** | Up to 64 extra address spaces; each owns an NPT root (`SpacePool.hpp`) |
 | 3 | `hv_vm_space_destroy` | **Yes** | `HV_BUSY` while a vCPU is bound to it; unmaps and unpins its pages |
 | 4 | `hv_vm_map` | **Yes** | Pins the caller's pages; 4 KiB alignment; up to `AMDHV_MAP_MAX_SIZE` |
@@ -128,7 +129,7 @@ task/thread targets). Indices are the framework's, not ours. A **stub** is logge
 | 9 | `hv_vm_remove_pio_notifier` | **No** | Stub |
 | 10 | `hv_vm_atpic_*` / `hv_vm_ioapic_*` / `hv_vm_lapic_*` | **No** | Stubs; in-kernel APIC only |
 | 11 | `hv_vm_lapic_msi` | **No** | Stub |
-| 12 | `hv_vcpu_create` | **Yes** | One vCPU per thread, up to 64; same task as the VM |
+| 12 | `hv_vcpu_create` | **Yes** | One vCPU per thread, up to 64; same task as the VM. A second create on the same thread is refused with `HV_ERROR` (observed 2026-11-23) |
 | 13 | `hv_vcpu_interrupt` | **Yes** | IPI to the CPU in the guest |
 | 14–15 | unused | **n/a** | Stubs |
 
@@ -347,6 +348,37 @@ The three panic reports from earlier the same day (04:39, 17:17, 17:25) predate 
 backtraces implicate `as.vit9696.VirtualSMC` / `as.vit9696.Lilu` (two page faults at CR2
 `0xfed80310`) and `com.apple.driver.watchdog` (watchdog timeout), with no AMDHV frame.
 
+### Limitation validation (2026-11-23, boot 09:54, AMDHV 0.2.0)
+
+The installed kext is the 0.2.0 release build (`A68EAC46-466C-3132-98E9-FB0D39B1F2A9`). The host is
+the same Ryzen 5 3600 (12 logical CPUs) running macOS 15.8.3 (24H241). `make test` passes all 15
+tests, `amd-info selftest` answers `12 of 12 CPUs ok`, and `amd-info info` reports SVM active on all
+12 CPUs with `enableFailures = 0`.
+
+| Claim | Result | Evidence |
+| --- | --- | --- |
+| 64 vCPUs per VM | **Confirmed** | `hvf-probe`: `64 of 64`. A separate 65-thread probe created 64; the 65th `hv_vcpu_create` was refused (`HV_ERROR`, `0xfae94001`, from `AMDHVVmShared::attach()` returning `kIOReturnNoResources`). `kMaxVcpus` and `AMDHV_MAX_VCPUS_PER_VM` are 64. |
+| One VM per task | **Confirmed** | `hvf-probe`: `hv_vm_create twice in one task` → `HV_BUSY`; `tVmCreate()` returns `kHvBusy` when the task target is set. |
+| Several VM processes at once | **Confirmed for two** | Two `hvf-smoke` processes ran together; both printed `PASS`, and `vmInvalidExits` stayed 0. This does not make "several at once" as tested as a single VM. |
+| 64 extra address spaces | **Confirmed** | 65 `hv_vm_space_create` calls: 64 succeed and the 65th returns `HV_NO_RESOURCES` (`0xfae94005`); `SpacePool.hpp` sets `kMax = 64`. |
+| Single `hv_vm_map` range | **16 GiB cap confirmed** | `AMDHV_MAP_MAX_SIZE` is 16 GiB (`Vm.cpp`); a request for 16 GiB + 1 returns `HV_BAD_ARGUMENT` (`0xfae94003`). The largest live mapping in the record is 4 GiB. |
+| No entitlement check | **Confirmed** | An unsigned binary with no entitlements, run as uid 501, created a VM and a vCPU successfully. `kext/Source` contains no entitlement lookup. The tools are still signed with `com.apple.security.hypervisor` for Apple's framework. |
+| Sleep/wake with a live guest | **Still not exercised** | `kern.sleeptime = 0`, `kern.sleep_abs_time = 0`, `kern.hibernatecount = 0`, `pmset` reports `Total Sleep/Wakes since boot: 0`, and the kext reports `sleepEvents = 0`, `wakeEvents = 0`. `tests/sleep_policy_test.cpp` passes; the S3 acceptance run remains section 7, item 9. |
+| QEMU Windows hang, VirtualBox Windows | **Not re-run** | No standalone `qemu-system-x86_64` is on `PATH` or in `/usr/local`, `/opt/local` or `/opt/homebrew`; the only copy is the Android emulator's private build, which is not the upstream QEMU the test used. VirtualBox 7.2.22 is present, but its only registered VM is Ubuntu (`deb`) and no Windows ISO is in `~/Downloads` or `~/isos`. The observations in `docs/QEMU.md` and `docs/VIRTUALBOX.md` remain prior evidence, not a fresh run. |
+| One vCPU per thread, VM teardown | **Confirmed** | A second `hv_vcpu_create` on the same thread returns `HV_ERROR` (`0xfae94001`). `hv_vm_destroy` with a live vCPU also returns `HV_ERROR`, and the same call succeeds after the last `hv_vcpu_destroy`. The capability tables used to say `HV_BUSY`; the client-visible answer is `HV_ERROR`. |
+| 2 MiB / 1 GiB NPT leaves | **Confirmed absent** | `Npt.hpp` `encodeLeaf()` sets no PS bit; `VmcsCaps.hpp` states the capability word does not advertise large leaves; `npt_test` passes. |
+| PIO notifier, APIC sub-ops, `hv_vcpu_flush` | **Confirmed unsupported** | `hvf-probe` answers `HV_UNSUPPORTED` for `hv_vcpu_inject_extint`, the APIC/IOAPIC calls and the PIO notifier. A direct call returned `hv_vcpu_flush = HV_UNSUPPORTED`. |
+| AVIC, VGIF, vVMSAVE/VMLOAD, LBRV, SVML, TSCRATE | **Confirmed unused** | The CPU reports the feature bits (`amd-info info`), but no VMCB control path enables them and the capability words do not advertise the corresponding controls. |
+| >64 logical CPUs | **Not exercisable here** | This host has 12. `AMDHV_MAX_CPUS` is 64, and `probeAction()`/`enableAction()` skip `cpu_number() >= 64`. |
+| Guest DR0–DR3 | **Partial, by design** | `Vm.cpp` sets `interceptDr = 0xFFFFFFFF`; VMRUN does not swap DR0–DR3, so the client services them. Not exercised live in this run. |
+| Verified host | **Confirmed** | AMD Ryzen 5 3600, macOS 15.8.3 (24H241), 12 logical CPUs, kext 0.2.0; `hvf-smoke`, `hvf-probe`, `amd-info info` and `selftest` all pass. |
+
+Counters after the final runs: `vmCreates = 210`, `vmRuns = 676`, `vmExits = 1763`,
+`vmInvalidExits = 0`, `vmFpuMismatches = 0`, `assertFailures = 0`, `enableFailures = 0`,
+`sleepEvents = 0`, `wakeEvents = 0`. The kext ring contains 12 warnings: ten `VM map failed` lines
+from the probe's deliberate invalid maps and the `VmCreate: ... no room for another vCPU` pair from
+the expected refusal of the 65th vCPU. No other warning was written.
+
 ---
 
 ## 7. Open questions and observed issues
@@ -377,19 +409,22 @@ backtraces implicate `as.vit9696.VirtualSMC` / `as.vit9696.Lilu` (two page fault
    have written the *host* TSC. The intercept now stays set and `run()` emulates the access. This is
    a plausible mechanism for host-clock weirdness, but it does not explain the 5.1e9 s elapsed time
    in the watchdog panic below.
-6. **ASID/TLB path is new (not yet exercised on hardware).** The running kext still flushes on every
-   entry; the per-vCPU ASID and `FLUSH_BY_ASID` logic takes effect only after installing
-   `build/AMDHV.kext` and rebooting. After the reboot, run `hvf-smoke`, one VZ guest and a multi-vCPU
-   workload, then check `amd-info stats`. `amdhv_asid=0` restores the old flush-on-every-entry
-   behaviour for an A/B comparison.
-7. **VMCB clean bits are new (not yet exercised on hardware).** A wrong clean bit would make the guest
-   run with stale state, so the first post-reboot run should watch for `VMEXIT_INVALID`, guest
-   corruption and `assertFailures`. The path is gated on CPUID `VMCB_CLEAN`; the CPU here reports it.
-   If anything looks wrong, set `control.clean = 0` unconditionally in `run()` (one line) to restore
-   the old behaviour while keeping the rest of the change.
-8. **Address spaces are new (not yet exercised on hardware).** `hv_vm_space_create`/`map_space`/
-   `protect_space`/`unmap_space`/`space_destroy` now allocate real NPT roots. The trap ABI was
-   checked against the running framework with `amd-info log`:
+6. **ASID/TLB path (exercised).** The build installed on 2026-11-22 21:53 already carried the
+   per-vCPU ASID and `FLUSH_BY_ASID` logic (commit `d0b3751` at 21:18, built at 21:33), so the
+   36.7M-exit VZ guest later that evening ran it; the 0.2.0 build on 2026-11-23 adds the sleep fix,
+   not a new ASID path. That run finished with `vmInvalidExits = 0` and `assertFailures = 0`, and
+   `amd-info info` reports `FlushByAsid`. `amdhv_asid=0` still restores the old
+   flush-on-every-entry behaviour for an A/B comparison.
+7. **VMCB clean bits (exercised).** The same 21:33 build enabled them, and the 36.7M-exit VZ run
+   produced no `VMEXIT_INVALID`, no guest corruption and `assertFailures = 0`. The path is gated on
+   CPUID `VMCB_CLEAN`, which this CPU reports. If stale state is ever suspected, set
+   `control.clean = 0` unconditionally in `run()` (one line) to restore the old behaviour while
+   keeping the rest of the change.
+8. **Address spaces (exercised).** `hv_vm_space_create`/`map_space`/`protect_space`/`unmap_space`/
+   `space_destroy` allocate real NPT roots. `hvf-probe` passes all of them, answers `HV_BUSY` on
+   `space_destroy` while a vCPU is bound and `HV_BAD_ARGUMENT` for an unknown space; a separate
+   probe created 64 extra spaces and got `HV_NO_RESOURCES` on the 65th, matching `SpacePool.hpp`
+   (`kMax = 64`). The trap ABI was checked against the running framework with `amd-info log`:
    - `hv_vm_space_create(&sp)` passes a pointer to a 4-byte `hv_vm_space_t` (the log showed the
      pointer and the variable's initial `0xdeadbeef`);
    - `hv_vm_space_destroy(id)` and `hv_vcpu_set_space(vcpu, id)` pass the raw ID (`0x77`, `0xdead`,
@@ -420,6 +455,11 @@ backtraces implicate `as.vit9696.VirtualSMC` / `as.vit9696.Lilu` (two page fault
    `kSystemMessageClientKernel`, which the full-to-dark branch clears. The zero counters are
    therefore expected and are not a kext fault. Acceptance still requires a boot that reaches S3:
    `kern.sleeptime` becomes non-zero, then `sleepEvents = 1`, `wakeEvents = 1`.
+
+   Second attempt, 2026-11-23 09:54 boot (AMDHV 0.2.0): the host still did not sleep.
+   `kern.sleeptime`, `kern.sleep_abs_time` and `kern.hibernatecount` are 0, `pmset -g log` reports
+   `Total Sleep/Wakes since boot: 0`, and `amd-info stats` shows `sleepEvents = 0`,
+   `wakeEvents = 0`. The 0.2.0 build carries the sleep fix; only the hardware S3 run is missing.
 
 ### Appendix — panic evidence seen on 2026-11-22
 

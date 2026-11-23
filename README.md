@@ -23,7 +23,7 @@ colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longe
 ## Build
 
 ```bash
-make test          # 14 unit tests, runs anywhere
+make test          # 15 host tests, runs anywhere
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
@@ -104,9 +104,18 @@ sudo build/amd-info log -f      # live kernel log
 If a RyzenHV kext is still installed, remove it from `EFI/OC/Kexts` and its Kernel → Add entry first:
 the two kexts fight over SVM and only one can register as the hypervisor provider.
 
+## Capacity
+
+Up to 64 vCPUs per VM, matching Apple's API and the 64 slices the front end reserves (VZ reports 64
+as `maximumAllowedCPUCount` on macOS 15 x86). One VM per process, as in Apple's API; separate
+processes can each run a VM, but several at once are less tested than a single one.
+
 ## Limits
 
-- 64 vCPUs per VM (VZ's maximum, and what the front end reserves). One VM program at a time is safest.
+- Up to 64 extra address spaces per VM (`hv_vm_space_create`); the 65th returns `HV_NO_RESOURCES`.
+- A single `hv_vm_map` range is capped at 16 GiB, and nested page tables use 4 KiB leaves only (no
+  2 MiB or 1 GiB leaves).
+- Hosts with more than 64 logical CPUs enable SVM on the first 64 only (`AMDHV_MAX_CPUS`).
 - Sleep/wake with a running VM is untested — shut VMs down first.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.
@@ -124,7 +133,7 @@ kext/          the kext: SVM, VMCB, VMRUN, nested page tables, the Hypervisor.fr
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
 tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
                hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
-tests/         the 14 unit tests
+tests/         the 15 host tests
 scripts/       EFI install, symbol check, legacy QEMU boot test
 docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
                CAPABILITIES.md (API matrix),
