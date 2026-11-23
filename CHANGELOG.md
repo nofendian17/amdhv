@@ -1,9 +1,11 @@
 # Changelog
 
 All notable changes to AMDHV are documented here. Format follows Keep a Changelog; versions follow
-semantic versioning. The kext version lives in `kext/Info.plist` and should match the tag.
+semantic versioning. The `v*` git tag is the release version: `kext/Makefile` stamps it into the
+built `Info.plist`. The value committed in `kext/Info.plist` is only a fallback for source archives
+made with `git archive`, which have no tag metadata.
 
-## [0.3.0] — 2026-11-23 (not tagged yet)
+## [0.3.0] — 2026-11-23
 
 ### Added
 - `hv_vcpu_set_tsc_relative` now applies the guest TSC offset through `TscOffset.hpp`.
@@ -22,6 +24,9 @@ semantic versioning. The kext version lives in `kext/Info.plist` and should matc
 - `hvf-probe` now measures all 79 exported x86 Hypervisor.framework calls; no API is "unverified".
 - `HV_VM_ACCEL_APIC` is opt-in via `amdhv_apic=1` (default off), so existing clients keep the
   previously validated path.
+- Internal: kext sources are grouped by responsibility and `Vm.cpp` is split into vCPU, run-loop
+  and shared-state modules. Host-test coverage is now measurable with `make coverage` (99.24% of
+  host-testable headers). No ABI or runtime behaviour change; rationale in `docs/decisions/`.
 
 ### Fixed
 - SMAP panic in LAPIC `get_state`: the ext struct is built in a kernel buffer and copied with

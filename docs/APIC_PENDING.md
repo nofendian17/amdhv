@@ -69,7 +69,8 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
    exits at `RIP 0x1007`. EAX reads `0x160`, not the modelled TPR `0x55`: Apple's framework maps the
    LAPIC page itself in an APIC-accelerated VM, so the NPF fallback did not fire. Treat the NPF path
    as a safety net, not the primary APIC access route.
-5. **PR #5** is still open; nothing here is claimed as full compatibility.
+5. The APIC work is merged into `main` (PR #6 / `release/v0.3.0`); the live gaps above still mean
+    this is not claimed as full compatibility.
 
 ## Why no more reboot was requested
 

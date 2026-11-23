@@ -24,10 +24,13 @@ colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longe
 
 ```bash
 make test          # 18 host tests, runs anywhere
+make coverage      # same tests under gcov; data in build/cov/gcov
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
-The kext Makefile tracks header dependencies: editing a `.hpp`/`.h` rebuilds every object that includes it.
+A single tool can be rebuilt while debugging with `make amd-info`, `make hvf-smoke` or
+`make hvf-probe`. Both Makefiles track header dependencies: editing a `.hpp`/`.h` rebuilds
+every object or test binary that includes it.
 
 ## Install
 
@@ -152,5 +155,13 @@ docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
                DOCKER_DESKTOP.md, KIRI.md, COLIMA.md, VIRTUALBOX.md,
                ANDROID_STUDIO.md, QEMU.md
 ```
+
+## Architecture decisions
+
+The reasoning behind the source layout and the test strategy is recorded in
+`docs/decisions/`:
+
+- [ADR-001](docs/decisions/ADR-001-kext-source-layout.md) — source groups, the `Vm.cpp` split, and why `Frontend.cpp` stays one file.
+- [ADR-002](docs/decisions/ADR-002-host-testing-strategy.md) — header-only host-testable logic and how coverage is measured.
 
 MIT license, see `LICENSE`. Ported from RyzenHV (MIT) — keep that copyright when redistributing.
