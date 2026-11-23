@@ -3,7 +3,7 @@
 All notable changes to AMDHV are documented here. Format follows Keep a Changelog; versions follow
 semantic versioning. The kext version lives in `kext/Info.plist` and should match the tag.
 
-## [Unreleased] — v0.3.0 (planned, not tagged)
+## [0.3.0] — 2026-11-23 (not tagged yet)
 
 ### Added
 - `hv_vcpu_set_tsc_relative` now applies the guest TSC offset through `TscOffset.hpp`.
