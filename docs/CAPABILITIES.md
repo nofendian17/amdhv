@@ -247,7 +247,7 @@ field. The five `hv_vcpu_exit_*` helpers and `hv_vcpu_vmx_status`/`hv_vcpu_exit_
 
 ## Capability words follow the implementation
 
-`hv_vmx_read_capability` no longer returns a fixed copy of an Intel Mac's words. `kext/Source/VmcsCaps.hpp`
+`hv_vmx_read_capability` no longer returns a fixed copy of an Intel Mac's words. `kext/Source/vmcs/VmcsCaps.hpp`
 derives each control word from what the kext actually implements, so a client that canonicalises its
 controls through `cap2ctrl` (QEMU, the Android emulator, the smoke test) cannot ask for a feature that
 would only be shadowed:
@@ -331,7 +331,7 @@ most of them in userspace before any trap is reached. A follow-log capture of `h
 shows only `hv_vm_lapic_msi` reaching task trap 11; the gate is `hv_vm_create(HV_VM_ACCEL_APIC)`,
 which the provider refused.
 
-The first slice added a host-testable register model (`kext/Source/ApicState.hpp`,
+The first slice added a host-testable register model (`kext/Source/arch/ApicState.hpp`,
 `tests/apic_test.cpp`) whose LAPIC/IOAPIC/8259A layouts match the SDK state structs byte for byte.
 `tVmCreate` accepts `HV_VM_ACCEL_APIC` with boot-arg `amdhv_apic=1`; on the rebooted host that made
 the call return `ok`, and `hvf-probe --apic` exercised all 32 APIC calls under such a VM.

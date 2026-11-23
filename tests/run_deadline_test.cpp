@@ -1,12 +1,12 @@
 /*
- * run_deadline_test.cpp - host-side tests for kext/Source/RunDeadline.hpp.
+ * run_deadline_test.cpp - host-side tests for kext/Source/policy/RunDeadline.hpp.
  *
  * The run loop itself needs a CPU in guest mode, but the rule that decides when it stops does not.
  */
 #include <stdio.h>
 #include <stdint.h>
 
-#include "../kext/Source/RunDeadline.hpp"
+#include "../kext/Source/policy/RunDeadline.hpp"
 
 namespace {
 

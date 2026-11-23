@@ -1,5 +1,5 @@
 /*
- * apic_test.cpp - host-side tests for kext/Source/ApicState.hpp.
+ * apic_test.cpp - host-side tests for kext/Source/arch/ApicState.hpp.
  *
  * The guest-facing wiring needs a kext, but the register rules do not.
  */
@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "../kext/Source/ApicState.hpp"
+#include "../kext/Source/arch/ApicState.hpp"
 
 namespace {
 
@@ -77,6 +77,23 @@ void testIoApic()
     amdhv::apic::ioWrite(s, 0x10, 0x10021);              /* mask it again */
     amdhv::apic::assertIrq(s, 0);
     CHECK(amdhv::apic::pendingVector(s) == 0);
+
+    /* ID register, reserved/version registers and unknown selectors. */
+    amdhv::apic::ioWrite(s, 0x00, 0x05000000u);
+    CHECK(amdhv::apic::ioRead(s, 0x00) == 0x05000000u);
+    CHECK(amdhv::apic::ioRead(s, 0x02) == 0);
+    CHECK(amdhv::apic::ioRead(s, 0x60) == 0);
+    amdhv::apic::ioWrite(s, 0x60, 0);                     /* unknown selector: no-op */
+    CHECK(amdhv::apic::ioRead(s, 0x60) == 0);
+
+    /* Out-of-range vectors and empty state must not corrupt the register model. */
+    amdhv::apic::LapicState q;
+    amdhv::apic::reset(q);
+    CHECK(amdhv::apic::highestIsrVector(q) == 0);
+    CHECK(amdhv::apic::highestBit32(0) == 0);   /* no bit set: the scan falls through */
+    amdhv::apic::setEoi(q, 15);
+    amdhv::apic::setEoi(q, 256);
+    CHECK(amdhv::apic::highestIsrVector(q) == 0);
 }
 
 void testAtpic()

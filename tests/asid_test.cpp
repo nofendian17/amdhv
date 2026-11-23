@@ -1,7 +1,7 @@
-/* asid_test.cpp - host tests for kext/Source/Asid.hpp. */
+/* asid_test.cpp - host tests for kext/Source/svm/Asid.hpp. */
 #include <stdio.h>
 
-#include "../kext/Source/Asid.hpp"
+#include "../kext/Source/svm/Asid.hpp"
 
 using namespace amdhv::asid;
 

@@ -138,3 +138,21 @@ two hypervisor providers cannot coexist.
 In OpenCore Configurator or ProperTree: open `EFI/OC/config.plist`, go to **Kernel → Add**, add a
 dict with the six fields from step 3, then go to **NVRAM → Add → 7C436110-... → boot-args** and
 append the two AMDHV arguments. Save, then run the `plutil -lint` check above.
+
+## Checking for updates with OCAT
+
+OpenCore Auxiliary Tools does not know AMDHV by default. Add this line to
+`~/.config/OCAuxiliaryTools/KextUrl.txt` (create the file if it does not exist):
+
+```text
+AMDHV.kext | https://github.com/nofendian17/amdhv
+```
+
+Then open your `config.plist` in OCAT, go to **Sync OC**, tick `AMDHV.kext` and click
+**Check Kexts updates**. The marker is green when the installed `CFBundleVersion` matches the
+release, red when a newer one exists.
+
+Every release ships `AMDHV-<version>-macos-x86_64.zip` with `AMDHV.kext` at the archive root:
+OCAT picks assets whose name contains `AMDHV` and unzips them. OCAT actually decides an
+update is available by comparing the binary's MD5, so a rebuilt kext is flagged even when the
+version string is unchanged — bump the version for a real release.

@@ -1,7 +1,7 @@
-/* tlb_policy_test.cpp - host tests for kext/Source/TlbPolicy.hpp. */
+/* tlb_policy_test.cpp - host tests for kext/Source/policy/TlbPolicy.hpp. */
 #include <stdio.h>
 
-#include "../kext/Source/TlbPolicy.hpp"
+#include "../kext/Source/policy/TlbPolicy.hpp"
 
 using namespace amdhv::vmcb;
 

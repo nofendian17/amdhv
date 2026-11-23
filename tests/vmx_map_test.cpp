@@ -1,5 +1,5 @@
 /*
- * vmx_map_test.cpp - host-side tests for kext/Source/VmxMap.hpp.
+ * vmx_map_test.cpp - host-side tests for kext/Source/memory/VmxMap.hpp.
  *
  * When the Hypervisor.framework SDK headers are available (any Mac with Xcode) every field in
  * VmcsFields.def is compared against Apple's own constant of the same name.
@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../kext/Source/VmxMap.hpp"
+#include "../kext/Source/memory/VmxMap.hpp"
 
 #if defined(__x86_64__) && __has_include(<Hypervisor/hv_arch_vmx.h>)
 #include <Hypervisor/hv_arch_vmx.h>
@@ -44,7 +44,7 @@ void testFieldList()
     /* Every entry must equal Apple's constant of the same name. */
     int checked = 0;
 #define F(name, enc) CHECK((uint32_t)(name) == (uint32_t)(enc)); checked++;
-#include "../kext/Source/VmcsFields.def"
+#include "../kext/Source/vmcs/VmcsFields.def"
 #undef F
     CHECK(checked == (int)kNumFields);
     printf("  (checked %d fields against the SDK headers)\n", checked);
@@ -172,6 +172,15 @@ void testExits()
     CHECK(translateExit(ex(0x8D), &v) && v.reason == VMX_XSETBV);
     CHECK(translateExit(ex(0x6E), &v) && v.reason == VMX_RDTSC);
     CHECK(translateExit(ex(0x87), &v) && v.reason == VMX_RDTSCP);
+    /* The remaining one-to-one SVM -> VMX exit translations. */
+    CHECK(translateExit(ex(0x63), &v) && v.reason == VMX_INIT);
+    CHECK(translateExit(ex(0x6F), &v) && v.reason == VMX_RDPMC);
+    CHECK(translateExit(ex(0x76), &v) && v.reason == VMX_INVD);
+    CHECK(translateExit(ex(0x77), &v) && v.reason == VMX_PAUSE);
+    CHECK(translateExit(ex(0x79), &v) && v.reason == VMX_INVLPG);
+    CHECK(translateExit(ex(0x7D), &v) && v.reason == VMX_TASK_SWITCH);
+    CHECK(translateExit(ex(0x8A), &v) && v.reason == VMX_MONITOR);
+    CHECK(translateExit(ex(0x8B), &v) && v.reason == VMX_MWAIT);
 
     /* MSR: EXITINFO1 0 = RDMSR, 1 = WRMSR. */
     CHECK(translateExit(ex(EXIT_MSR, 0), &v) && v.reason == VMX_RDMSR);

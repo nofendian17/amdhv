@@ -55,7 +55,7 @@ enum {
     kAMDHVMethodCount
 };
 
-/* kAMDHVMethodHvControl, front end (kext/Source/Frontend.cpp). */
+/* kAMDHVMethodHvControl, front end (kext/Source/core/Frontend.cpp). */
 enum {
     kAMDHVHvGet     = 0,   /* value ignored */
     kAMDHVHvMode    = 1,   /* value 0: unregister the traps; 1: register, answer HV_UNSUPPORTED to unimplemented traps; 2: register, answer success */
@@ -301,11 +301,39 @@ typedef char amdhv_assert_exit_size[(sizeof(AMDHVExit) == 48) ? 1 : -1];
 typedef char amdhv_assert_runin_size[(sizeof(AMDHVRunIn) == 8 + sizeof(AMDHVRegs) + AMDHV_RUN_MAX_WRITES * 16) ? 1 : -1];
 typedef char amdhv_assert_runout_size[(sizeof(AMDHVRunOut) == 8 + 48 + sizeof(AMDHVRegs) + AMDHV_RUN_NFIELDS * 8) ? 1 : -1];
 
-/* IOIO exit decoding (EXITINFO1 of SVM exit 0x7B, AMD APM Vol.2, 15.10.2). */
+/** IOIO exit decoding (EXITINFO1 of SVM exit 0x7B, AMD APM Vol.2, 15.10.2). */
 static inline uint32_t amdhv_ioio_port(uint64_t info1)    { return (uint32_t)(info1 >> 16) & 0xFFFF; }
+/**
+ * @brief Check whether the port I/O exit is a read.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int      amdhv_ioio_is_in(uint64_t info1)   { return (int)(info1 & 1); }
+/**
+ * @brief Check whether the port I/O exit is a string operation.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int      amdhv_ioio_is_string(uint64_t info1) { return (int)((info1 >> 2) & 1); }
+/**
+ * @brief Check whether the port I/O exit repeats.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int      amdhv_ioio_has_rep(uint64_t info1) { return (int)((info1 >> 3) & 1); }
+/**
+ * @brief Extract the access size in bytes from an SVM EXITINFO1.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The uint32_t result.
+ */
 static inline uint32_t amdhv_ioio_size(uint64_t info1)
 {
     if (info1 & (1u << 4)) return 1;
@@ -314,18 +342,48 @@ static inline uint32_t amdhv_ioio_size(uint64_t info1)
     return 0;
 }
 
-/*
- * NPF exit decoding (EXITINFO1 of SVM exit 0x400, AMD APM Vol.2, 15.25.6).
- * Bits 31:0 are a #PF-style error code. EXITINFO2 is the faulting guest physical address only when
- * bit 32 says so (DecodeAssists); otherwise it must not be used as a GPA.
+/**
+ * @brief Check whether the faulting page was present.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
  */
 static inline int amdhv_npf_present(uint64_t info1)  { return (int)(info1 & 1); }          /* page was mapped but rights were insufficient */
+/**
+ * @brief Check whether the nested-page fault was a write.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int amdhv_npf_is_write(uint64_t info1) { return (int)((info1 >> 1) & 1); }
+/**
+ * @brief Check whether the nested-page fault was an instruction fetch.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int amdhv_npf_is_fetch(uint64_t info1) { return (int)((info1 >> 4) & 1); }
+/**
+ * @brief Check whether the nested-page fault reports a valid guest physical address.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int amdhv_npf_gpa_valid(uint64_t info1) { return (int)((info1 >> 32) & 1); } /* EXITINFO2 is a guest physical address */
+/**
+ * @brief Check whether the nested-page fault happened during a page-table walk.
+ *
+ * @param info1 SVM EXITINFO1 for the exit.
+ *
+ * @return The int result.
+ */
 static inline int amdhv_npf_in_walk(uint64_t info1)  { return (int)((info1 >> 33) & 1); }  /* fault while the CPU read the guest's own page tables */
 
-/* CPUID helpers, pure functions so they can be unit-tested on any host. */
+/** CPUID helpers, pure functions so they can be unit-tested on any host. */
 
 static inline uint32_t amdhv_amd_family(uint32_t cpuid1Eax)
 {
@@ -334,6 +392,13 @@ static inline uint32_t amdhv_amd_family(uint32_t cpuid1Eax)
     return base == 0xF ? base + ext : base;
 }
 
+/**
+ * @brief Extract the AMD model from CPUID leaf 1 EAX.
+ *
+ * @param cpuid1Eax CPUID leaf 1 EAX.
+ *
+ * @return The uint32_t result.
+ */
 static inline uint32_t amdhv_amd_model(uint32_t cpuid1Eax)
 {
     uint32_t base  = (cpuid1Eax >> 8) & 0xF;
@@ -342,12 +407,19 @@ static inline uint32_t amdhv_amd_model(uint32_t cpuid1Eax)
     return base == 0xF ? (ext << 4) | model : model;
 }
 
+/**
+ * @brief Extract the AMD stepping from CPUID leaf 1 EAX.
+ *
+ * @param cpuid1Eax CPUID leaf 1 EAX.
+ *
+ * @return The uint32_t result.
+ */
 static inline uint32_t amdhv_amd_stepping(uint32_t cpuid1Eax)
 {
     return cpuid1Eax & 0xF;
 }
 
-/* "AuthenticAMD" as returned in EBX, EDX, ECX by CPUID leaf 0. */
+/** "AuthenticAMD" as returned in EBX, EDX, ECX by CPUID leaf 0. */
 static inline int amdhv_is_amd_vendor(uint32_t ebx, uint32_t ecx, uint32_t edx)
 {
     return ebx == 0x68747541u && edx == 0x69746E65u && ecx == 0x444D4163u;

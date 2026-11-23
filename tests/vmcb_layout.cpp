@@ -1,12 +1,12 @@
 /*
  * Host-side check of the VMCB layout. The real work is the static_asserts in
- * kext/Source/VMCB.hpp: if this file compiles, every offset matches the AMD
+ * kext/Source/svm/VMCB.hpp: if this file compiles, every offset matches the AMD
  * manual. The runtime part only checks the attribute helper.
  */
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../kext/Source/VMCB.hpp"
+#include "../kext/Source/svm/VMCB.hpp"
 
 using namespace amdhv::vmcb;
 

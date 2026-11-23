@@ -96,6 +96,17 @@ static void test_ring_chunked_reader(void)
     CHECK(n == 0 && cursor == 10);
 }
 
+static void test_ring_zero_size(void)
+{
+    AMDHVRing r;
+    uint64_t next = 99, dropped = 99;
+
+    amdhv_ring_init(&r, NULL, 0);
+    amdhv_ring_write(&r, "data", 4);          /* no divide-by-zero, no write */
+    CHECK(amdhv_ring_read(&r, 0, NULL, 0, &next, &dropped) == 0);
+    CHECK(next == 0 && dropped == 0);
+}
+
 int main(void)
 {
     /* Ryzen 7 5800H (Cezanne): CPUID Fn0000_0001 EAX = 0x00A50F00 -> family 19h, model 50h. */
@@ -143,6 +154,7 @@ int main(void)
     test_ring_wrap();
     test_ring_oversized_write();
     test_ring_chunked_reader();
+    test_ring_zero_size();
 
     puts("host_test: OK");
     return 0;

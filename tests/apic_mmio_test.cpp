@@ -1,10 +1,10 @@
 /*
- * apic_mmio_test.cpp - host-side tests for kext/Source/ApicMmio.hpp.
+ * apic_mmio_test.cpp - host-side tests for kext/Source/arch/ApicMmio.hpp.
  */
 #include <stdio.h>
 #include <stdint.h>
 
-#include "../kext/Source/ApicMmio.hpp"
+#include "../kext/Source/arch/ApicMmio.hpp"
 
 namespace {
 
@@ -55,6 +55,9 @@ void testRejectsEverythingElse()
 {
     const uint8_t absolute[] = { 0x8B, 0x05, 0x80, 0x00, 0xE0, 0xFE };
     CHECK(!amdhv::apic::decodeMmio(absolute, 5).valid);          /* truncated */
+    /* An operand-size prefix needs one extra byte: 6 bytes total is not enough. */
+    const uint8_t shortPrefix[] = { 0x66, 0x8B, 0x05, 0x80, 0x00, 0xE0 };
+    CHECK(!amdhv::apic::decodeMmio(shortPrefix, sizeof(shortPrefix)).valid);
     const uint8_t indirect[] = { 0x8B, 0x00, 0x90, 0x90, 0x90, 0x90 };
     CHECK(!amdhv::apic::decodeMmio(indirect, sizeof(indirect)).valid); /* [RAX], not absolute */
     const uint8_t other[] = { 0xA1, 0x80, 0x00, 0xE0, 0xFE, 0x90 };

@@ -17,9 +17,13 @@ action by itself** — each stage needs a human decision.
 | Smoke | `hvf-smoke`: `PASS` | Green |
 | Host sanity | `amd-info info`: SVM active 12/12, 32768 ASIDs; `selftest`: 12 of 12 CPUs ok | Green |
 | Failure counters | `vmInvalidExits`, `assertFailures`, `enableFailures`, `vmFpuMismatches` = 0 | Green |
-| Code review | PR #5 merged; the later APIC work is still unmerged (28 commits on `docs/limitation-validation`) | **Open** |
-| Client re-test after APIC work | VZ/Kiri, VirtualBox, Android, QEMU last recorded on 0.1.x/0.2.0 | **Open** |
-| Changelog / release tag | No `CHANGELOG.md`; latest release `v0.2.0` | **Open** |
+| Code review | APIC work merged via PR #6 (`release/v0.3.0`); this refactor branch is still pending review | **Open** |
+| Client re-test after APIC work | Recorded 2026-11-23 on the installed 0.3.0 kext — see §7 (VZ/Kiri pass; VirtualBox/QEMU/Android blocked by missing local binaries) | **Partial** |
+| Changelog / release tag | `CHANGELOG.md` has a 0.3.0 section matching `kext/Info.plist`; annotated tag `v0.3.0` points at `c096121` on `main`. GitHub release not verifiable from the repo. | **Partial** |
+
+The `v*` tag is the source of truth for the version. `kext/Makefile` writes it into the built
+`Info.plist`; the value committed in `kext/Info.plist` is only a fallback for source archives
+(`git archive` has no `.git`). Tagging needs no manual version edit.
 
 ## 2. Feature flags (boot-args)
 
@@ -38,9 +42,10 @@ the flag on.
 
 ## 3. Staged rollout
 
-1. **Merge / tag**: open a PR from `docs/limitation-validation` into `main` for the 28 unmerged
-   commits; fold `docs/boot-args-apic` into it (or a separate docs PR). Bump the kext version to
-   **0.3.0** (additive features, backward-compatible) and tag `v0.3.0`.
+1. **Merge / tag**: `docs/limitation-validation`, `docs/boot-args-apic` and `release/v0.3.0` are
+   already merged into `main`, the kext version is already **0.3.0**, and the annotated tag
+   `v0.3.0` already points at `c096121`. Merge `refactor/structure-and-tools` (source layout,
+   docs and tool clean-up; no behaviour change and no version bump needed).
 2. **Baseline deploy (flag off)**: build the 0.3.0 kext, install to OpenCore with only the two
    required boot-args. Verify `hvf-smoke`, `hvf-probe`, `amd-info selftest`, counters, and the
    existing clients (VZ/Kiri, VirtualBox, Android, QEMU Linux). This is the production gate.
@@ -79,7 +84,7 @@ No data migration is involved — guest disks belong to the clients, not AMDHV.
 
 ## 6. Pre-launch sign-off
 
-- [ ] PR(s) merged into `main`; `v0.3.0` tag and GitHub release created from `CHANGELOG.md`
+- [ ] Refactor PR merged into `main`; `v0.3.0` tag verified at `c096121`, GitHub release checked against `CHANGELOG.md`
 - [ ] Baseline clients re-tested on the 0.3.0 build with APIC off
 - [ ] Beta hosts tested with `amdhv_apic=1`
 - [ ] Failure counters still 0 after one hour of real guest use

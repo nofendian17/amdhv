@@ -24,10 +24,13 @@ colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longe
 
 ```bash
 make test          # 18 host tests, runs anywhere
+make coverage      # same tests under gcov; data in build/cov/gcov
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
-The kext Makefile tracks header dependencies: editing a `.hpp`/`.h` rebuilds every object that includes it.
+A single tool can be rebuilt while debugging with `make amd-info`, `make hvf-smoke` or
+`make hvf-probe`. Both Makefiles track header dependencies: editing a `.hpp`/`.h` rebuilds
+every object or test binary that includes it.
 
 ## Install
 
@@ -131,7 +134,14 @@ processes can each run a VM, but several at once are less tested than a single o
 ## Sources
 
 ```
-kext/          the kext: SVM, VMCB, VMRUN, nested page tables, the Hypervisor.framework front end
+kext/Source/   the kext, grouped by responsibility:
+  core/        service, VM/vCPU lifecycle, Hypervisor.framework front end, user client
+  svm/         SVM enablement, VMCB, SvmRun.S, ASIDs, MSR maps, CPU feature checks
+  memory/      physical memory, nested page tables, address spaces, slot/MSR caches
+  vmcs/        VMCS/VMCB state emulation and field definitions
+  arch/        x86 declarations, APIC state and MMIO decoding
+  policy/      sleep, TLB, run-deadline and FPU policies (host-testable)
+  diag/        kernel log ring
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
 tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
                hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
@@ -145,5 +155,13 @@ docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
                DOCKER_DESKTOP.md, KIRI.md, COLIMA.md, VIRTUALBOX.md,
                ANDROID_STUDIO.md, QEMU.md
 ```
+
+## Architecture decisions
+
+The reasoning behind the source layout and the test strategy is recorded in
+`docs/decisions/`:
+
+- [ADR-001](docs/decisions/ADR-001-kext-source-layout.md) — source groups, the `Vm.cpp` split, and why `Frontend.cpp` stays one file.
+- [ADR-002](docs/decisions/ADR-002-host-testing-strategy.md) — header-only host-testable logic and how coverage is measured.
 
 MIT license, see `LICENSE`. Ported from RyzenHV (MIT) — keep that copyright when redistributing.

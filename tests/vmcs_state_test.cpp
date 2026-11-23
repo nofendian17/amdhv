@@ -1,11 +1,11 @@
 /*
- * vmcs_state_test.cpp - host-side tests for kext/Source/VmcsState.hpp: VMCS reads and writes landing in the
+ * vmcs_state_test.cpp - host-side tests for kext/Source/vmcs/VmcsState.hpp: VMCS reads and writes landing in the
  * VMCB, execution controls becoming intercepts, event injection, exit recording.
  */
 #include <stdio.h>
 #include <string.h>
 
-#include "../kext/Source/VmcsState.hpp"
+#include "../kext/Source/vmcs/VmcsState.hpp"
 #include "../include/AMDHVFields.h"
 
 using namespace amdhv::vmx;
@@ -393,6 +393,14 @@ void testCapabilities()
     CHECK(!controlAllowed(C_CPU_BASED2, bit(0), true));             /* virtualize APIC accesses */
     CHECK(!controlAllowed(C_CPU_BASED2, bit(9), true));             /* virtual-interrupt delivery */
     CHECK(!controlAllowed(C_CPU_BASED, bit(17) | bit(21), true));
+
+    /* An unknown field has no capabilities; a non-control field imposes no restriction at all.
+     * Volatile inputs keep these constexpr helpers in the runtime trace instead of folding them away. */
+    volatile uint32_t unknownField = 0x4008;
+    volatile bool shadow = true;
+    const ControlCaps none = controlCaps(unknownField, shadow);
+    CHECK(none.mustOne == 0 && none.mayOne == 0 && none.ignored == 0);
+    CHECK(controlAllowed(unknownField, ~0ull, shadow));
 
     /* VmcsState::write() applies the same rule. */
     Fixture f;

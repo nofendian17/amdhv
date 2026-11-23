@@ -17,12 +17,17 @@
 
 #include "../../include/AMDHVShared.h"
 
+/**
+ * @brief Open an IOService connection to the loaded AMDHV kext.
+ *
+ * @return The io_connect_t result.
+ */
 static io_connect_t connect_kext(void)
 {
     io_service_t svc = IOServiceGetMatchingService(0, IOServiceMatching(AMDHV_SERVICE_NAME));
     if (!svc) {
         fprintf(stderr, "AMDHV service not found. Is the kext loaded? (see README.md)\n");
-        exit(1);
+        return IO_OBJECT_NULL;
     }
 
     io_connect_t conn = 0;
@@ -30,11 +35,16 @@ static io_connect_t connect_kext(void)
     IOObjectRelease(svc);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "IOServiceOpen failed: 0x%x\n", kr);
-        exit(1);
+        return IO_OBJECT_NULL;
     }
     return conn;
 }
 
+/**
+ * @brief Print the SVM feature names selected by a feature mask.
+ *
+ * @param f SVM feature mask.
+ */
 static void print_features(uint32_t f)
 {
     static const struct {
@@ -61,6 +71,13 @@ static void print_features(uint32_t f)
         printf("    [%c] %s\n", (f & kFeatures[i].bit) ? 'x' : ' ', kFeatures[i].name);
 }
 
+/**
+ * @brief Print the CPU and SVM summary reported by the kext.
+ *
+ * @param conn Open kext connection.
+ *
+ * @return Zero on success, non-zero on error.
+ */
 static int cmd_info(io_connect_t conn)
 {
     AMDHVInfo info;
@@ -91,6 +108,14 @@ static int cmd_info(io_connect_t conn)
     return 0;
 }
 
+/**
+ * @brief Read the kernel log ring and optionally keep following it.
+ *
+ * @param conn Open kext connection.
+ * @param follow Whether to keep reading after the ring is drained.
+ *
+ * @return Zero on success, non-zero on error.
+ */
 static int cmd_log(io_connect_t conn, int follow)
 {
     static AMDHVLogChunk chunk;
@@ -123,6 +148,13 @@ static int cmd_log(io_connect_t conn, int follow)
     }
 }
 
+/**
+ * @brief Print the kext event counters.
+ *
+ * @param conn Open kext connection.
+ *
+ * @return Zero on success, non-zero on error.
+ */
 static int cmd_stats(io_connect_t conn)
 {
     AMDHVStats s;
@@ -166,6 +198,14 @@ static int cmd_stats(io_connect_t conn)
     return 0;
 }
 
+/**
+ * @brief Set the kernel log level through the user client.
+ *
+ * @param conn Open kext connection.
+ * @param arg Log level string (0-5).
+ *
+ * @return Zero on success, non-zero on error.
+ */
 static int cmd_level(io_connect_t conn, const char *arg)
 {
     char *end = NULL;
@@ -187,6 +227,15 @@ static int cmd_level(io_connect_t conn, const char *arg)
     return 0;
 }
 
+/**
+ * @brief Query or change the hypervisor front-end state.
+ *
+ * @param conn Open kext connection.
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ *
+ * @return Zero on success, non-zero on error.
+ */
 static int cmd_hv(io_connect_t conn, int argc, char **argv)
 {
     uint64_t in[2] = { kAMDHVHvGet, 0 }, out[2] = { 0, 0 };
@@ -220,6 +269,13 @@ static int cmd_hv(io_connect_t conn, int argc, char **argv)
     return 0;
 }
 
+/**
+ * @brief Run the SVM self-test on every usable CPU.
+ *
+ * @param conn Open kext connection.
+ *
+ * @return Zero on success, non-zero on error.
+ */
 static int cmd_selftest(io_connect_t conn)
 {
     uint64_t out[2] = { 0, 0 };
@@ -240,6 +296,14 @@ static int cmd_selftest(io_connect_t conn)
     return out[0] == out[1] ? 0 : 1;
 }
 
+/**
+ * @brief Tool entry point: dispatch the command or run the probe sequence.
+ *
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ *
+ * @return Process exit status.
+ */
 int main(int argc, char **argv)
 {
     const char *cmd = argc > 1 ? argv[1] : "info";
@@ -250,6 +314,8 @@ int main(int argc, char **argv)
     }
 
     io_connect_t conn = connect_kext();
+    if (!conn)
+        return 1;
     int rc;
 
     if (!strcmp(cmd, "info"))

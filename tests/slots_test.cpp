@@ -14,8 +14,8 @@
  *   - kMsrOfIdx holds no duplicates, only plausible MSR addresses, and the MSRs that
  *     hvf-smoke enables natively are all present exactly once
  */
-#include "../kext/Source/HvSlots.hpp"
-#include "../kext/Source/HvMsrs.hpp"
+#include "../kext/Source/memory/HvSlots.hpp"
+#include "../kext/Source/svm/HvMsrs.hpp"
 #include "../include/AMDHVShared.h"
 
 #include <cstdio>
@@ -42,7 +42,7 @@ static int failures;
 /* Field encodings by name, straight from the generated list. */
 #define F(name, enc) kEnc_##name = enc,
 enum : uint32_t {
-#include "../kext/Source/VmcsFields.def"
+#include "../kext/Source/vmcs/VmcsFields.def"
 };
 #undef F
 

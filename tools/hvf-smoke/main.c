@@ -6,7 +6,7 @@
  * registers, then run it and handle exits by reading the VMCS exit reason. On a real Intel Mac the same binary runs
  * against Apple's framework; on a Hackintosh with AMD it runs through the AMDHV kext (native mode, boot-arg amdhv_hv=1):
  *
- *     sudo env DYLD_INSERT_LIBRARIES=build/libryzenhv.dylib ./build/hvf-smoke
+ *     sudo ./build/hvf-smoke
 
  *
  * It checks: the VMX capability path, controls, registers, MSRs, FPU state, serial output through I/O exits, CPUID,
@@ -38,12 +38,20 @@ static int failures;
         }                                                  \
     } while (0)
 
-/* QEMU's cap2ctrl: controls that must be 1, plus the wanted ones the CPU allows. */
+/** QEMU's cap2ctrl: controls that must be 1, plus the wanted ones the CPU allows. */
 static uint64_t cap2ctrl(uint64_t cap, uint64_t ctrl)
 {
     return (ctrl | (cap & 0xffffffff)) & (cap >> 32);
 }
 
+/**
+ * @brief Read a VMCS field, reporting a failed read on stderr.
+ *
+ * @param v vCPU identifier.
+ * @param f VMCS field encoding.
+ *
+ * @return The uint64_t result.
+ */
 static uint64_t rvmcs(hv_vcpuid_t v, uint32_t f)
 {
     uint64_t x = 0;
@@ -53,7 +61,7 @@ static uint64_t rvmcs(hv_vcpuid_t v, uint32_t f)
     return x;
 }
 
-/* hv_vcpu_run returns on every VM exit, and an external interrupt or a kick of the vCPU (hv_vm_map and hv_vm_unmap kick them) can arrive at any time, as
+/** hv_vcpu_run returns on every VM exit, and an external interrupt or a kick of the vCPU (hv_vm_map and hv_vm_unmap kick them) can arrive at any time, as
  * stage 4 relies on. Runs again past those exits (a bounded number of times), so the checks that follow see the exit they are about. */
 static hv_return_t run_skip_irq(hv_vcpuid_t v)
 {
@@ -63,6 +71,13 @@ static hv_return_t run_skip_irq(hv_vcpuid_t v)
     return r;
 }
 
+/**
+ * @brief Write a VMCS field, reporting a failed write on stderr.
+ *
+ * @param v vCPU identifier.
+ * @param f VMCS field encoding.
+ * @param x Value to write.
+ */
 static void wvmcs(hv_vcpuid_t v, uint32_t f, uint64_t x)
 {
     hv_return_t r = hv_vmx_vcpu_write_vmcs(v, f, x);
@@ -70,6 +85,14 @@ static void wvmcs(hv_vcpuid_t v, uint32_t f, uint64_t x)
         fprintf(stderr, "hv_vmx_vcpu_write_vmcs(%#x) = %#x\n", f, (unsigned)r);
 }
 
+/**
+ * @brief Read a guest register, reporting a failed read on stderr.
+ *
+ * @param v vCPU identifier.
+ * @param r Guest register.
+ *
+ * @return The uint64_t result.
+ */
 static uint64_t rreg(hv_vcpuid_t v, hv_x86_reg_t r)
 {
     uint64_t x = 0;
@@ -79,6 +102,13 @@ static uint64_t rreg(hv_vcpuid_t v, hv_x86_reg_t r)
     return x;
 }
 
+/**
+ * @brief Write a guest register, reporting a failed write on stderr.
+ *
+ * @param v vCPU identifier.
+ * @param r Guest register.
+ * @param x Value to write.
+ */
 static void wreg(hv_vcpuid_t v, hv_x86_reg_t r, uint64_t x)
 {
     hv_return_t k = hv_vcpu_write_register(v, r, x);
@@ -101,7 +131,7 @@ static const uint8_t kProg2[] = { 0xB8, 0xFF, 0xFF, 0x8E, 0xD8, 0xC6, 0x06, 0x20
 /* 0x1300: a tight loop, to be interrupted from another thread. */
 static const uint8_t kProg3[] = { 0xEB, 0xFE };
 
-/* A real-mode machine, the way QEMU's hvf_reset_vcpu describes one. */
+/** A real-mode machine, the way QEMU's hvf_reset_vcpu describes one. */
 static void setup_real_mode(hv_vcpuid_t v, uint16_t ip)
 {
     static const struct { uint32_t sel, lim, ar, base; } seg[] = {
@@ -137,9 +167,13 @@ static void setup_real_mode(hv_vcpuid_t v, uint16_t ip)
 
 static hv_vcpuid_t g_vcpu;
 
+/**
+ * @brief Interrupt the vCPU once from a secondary thread.
+ *
+ * @param arg Output for the interrupt result.
+ */
 static void *interrupter(void *arg)
 {
-    (void)arg;
     usleep(30 * 1000);
     hv_vcpuid_t v = g_vcpu;
     hv_return_t r = hv_vcpu_interrupt(&v, 1);
@@ -147,6 +181,11 @@ static void *interrupter(void *arg)
     return NULL;
 }
 
+/**
+ * @brief Tool entry point: dispatch the command or run the probe sequence.
+ *
+ * @return Process exit status.
+ */
 int main(void)
 {
     hv_return_t r = hv_vm_create(HV_VM_DEFAULT);
@@ -187,7 +226,7 @@ int main(void)
     wvmcs(v, VMCS_CTRL_VMENTRY_CONTROLS, cap2ctrl(cap_entry, 0));
     wvmcs(v, VMCS_CTRL_EXC_BITMAP, 0);
     EXPECT((rvmcs(v, VMCS_CTRL_CPU_BASED) & CPU_BASED_HLT) != 0, "HLT exiting is on in the controls the capabilities allowed");
-    /* The TPR shadow is offered by default since 0.7.3 (`rhv-info hv tpr 0` or rhv_tpr_shadow=0 turns it off); when offered the helper above may set it, which is fine. */
+    /* The TPR shadow is offered by default (`amd-info hv tpr 0` or amdhv_tpr_shadow=0 turns it off); when offered the helper above may set it, which is fine. */
     EXPECT(((cap_proc >> 32) & CPU_BASED_TPR_SHADOW) || (rvmcs(v, VMCS_CTRL_CPU_BASED) & CPU_BASED_TPR_SHADOW) == 0, "TPR shadow: if it was not offered, it is not set");
 
     /* MSRs the guest kernel uses a lot, accessed natively. */

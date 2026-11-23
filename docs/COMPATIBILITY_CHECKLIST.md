@@ -597,5 +597,5 @@ is not a demonstrated cause of either panic.
 - applevisor (Rust bindings that document the same API surface):
   <https://docs.rs/applevisor/latest/applevisor/>
 - This repository: `docs/CAPABILITIES.md` (API matrix), `docs/CLIENTS.md` (per-client guides),
-  `kext/Source/VMCB.hpp`, `kext/Source/Npt.hpp`, `kext/Source/VmcsState.hpp`,
-  `kext/Source/VmcsCaps.hpp`, `kext/Source/Frontend.cpp`.
+  `kext/Source/svm/VMCB.hpp`, `kext/Source/memory/Npt.hpp`, `kext/Source/vmcs/VmcsState.hpp`,
+  `kext/Source/vmcs/VmcsCaps.hpp`, `kext/Source/core/Frontend.cpp`.
