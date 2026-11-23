@@ -69,7 +69,8 @@ inline void reset(AtpicState &s)
 {
     s.ready = s.icw_num = s.rd_cmd_reg = 0;
     s.aeoi = s.poll = s.rotate = s.sfn = 0;
-    s.irq_base = s.request = s.service = s.smm = s.last_request = s.lowprio = 0;
+    s.irq_base = 0x30;
+    s.request = s.service = s.smm = s.last_request = s.lowprio = 0;
     s.mask = 0xFF;                       /* every IRQ masked until the guestInitialises it */
     s.intr_raised = s.elc = 0;
 }
@@ -137,6 +138,15 @@ inline unsigned takeInterrupt(LapicState &s)
         }
     }
     return 0;
+}
+
+/* Highest unmasked 8259A request, translated to an interrupt vector via ICW2's base. */
+inline unsigned atpicPending(const AtpicState &s)
+{
+    const uint8_t pending = s.request & ~s.mask & ~s.service;
+    if (!pending)
+        return 0;
+    return (unsigned)s.irq_base + highestBit32(pending);
 }
 
 /* I/O APIC redirect-table access through the IOREGSEL/IOWIN pair. */

@@ -343,8 +343,10 @@ block codes. On the latest installed kext, 27 of the 32 APIC calls answer `ok`; 
 `hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's userspace layer. IOAPIC get/put state
 used the wrong word of the arg block and is fixed in this tree, pending a reboot to confirm.
 
-Nothing is advertised as full support: the calls are accepted, but interrupt delivery into the
-guest is not implemented yet.
+Nothing is advertised as full support: five `hv_vcpu_exit_*` helpers still fail and guest-visible
+interrupt delivery for APIC-accelerated VMs is only now being wired (8259A/IOAPIC → LAPIC IRR →
+VM-entry event injection). That path is host-tested and builds into the kext but needs a reboot
+before it can be called verified.
 
 ## A framework quirk worth knowing
 

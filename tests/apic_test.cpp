@@ -86,6 +86,10 @@ void testAtpic()
     s.mask &= ~(1u << 4);
     s.request = 1u << 4;
     CHECK((s.request & ~s.mask) != 0);                    /* IRQ4 can be serviced */
+    CHECK(amdhv::apic::atpicPending(s) == 0x34);          /* default ICW2 base 0x30 + IRQ4 */
+    s.mask |= 1u << 4;
+    CHECK(amdhv::apic::atpicPending(s) == 0);
+    s.mask &= ~(1u << 4);
     s.service = 1u << 4;
     s.request = 0;
     CHECK(s.service == (1u << 4));

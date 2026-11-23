@@ -886,6 +886,29 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         }
     }
 
+    /* In-kernel APIC: feed pending IRQs from the 8259A/IOAPIC models into this vCPU's LAPIC, then
+     * present the highest priority vector through the VM-entry event-injection field. The core's
+     * applyControls() turns that field into VMCB.eventInj; existing client injections win. */
+    if (v->vm->apicAccel) {
+        if (v->id == 0) {
+            for (unsigned p = 0; p < 2; p++) {
+                const unsigned vec = amdhv::apic::atpicPending(v->vm->atpic[p]);
+                if (vec)
+                    amdhv::apic::setIrr(v->lapic, vec);
+            }
+            const unsigned vec = amdhv::apic::pendingVector(v->vm->ioapic);
+            if (vec)
+                amdhv::apic::setIrr(v->lapic, vec);
+        }
+        uint64_t pending = 0;
+        const bool freeSlot = cpu->vmcsRead(0x4016, &pending) == kIOReturnSuccess && !(pending & (1ull << 31));
+        if (freeSlot) {
+            const unsigned vec = amdhv::apic::takeInterrupt(v->lapic);
+            if (vec)
+                cpu->vmcsWrite(0x4016, (1ull << 31) | vec);  /* external interrupt, no error code */
+        }
+    }
+
     /* 2. Run. */
     *validWord(v, 0) = 0;                              /* the guest changes things: nothing in the cache is trusted until refilled */
     *validWord(v, 1) = 0;
@@ -896,6 +919,8 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
      * interrupt and answers the guest's CR8 reads from it, so a write has to reach the core and read back (read<<4, write>>4). */
     {
         const uint64_t tpr = *gprWord(v, R_TPR);
+        if (v->vm->apicAccel)
+            v->lapic.tpr = (uint32_t)tpr;
         if (tpr != v->tprPage) {
             cpu->vmcsWrite(0xF004, (tpr >> 4) & 0xF);
             v->tprPage = tpr;
