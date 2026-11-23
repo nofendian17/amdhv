@@ -619,6 +619,51 @@ static void probeApicFamily(void)
     munmap(ram, RAM_SIZE);
 }
 
+/* Functional check for APIC delivery: a real-mode guest with an IVT entry for vector 0x30 and an
+ * IOAPIC redirect for IRQ0 to that vector. If the provider injected the interrupt, the HLT exit
+ * comes from the handler at 0x1200 rather than the guest entry at 0x1000. */
+static void probeApicRun(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) { perror("mmap"); return; }
+    memset(ram, 0, RAM_SIZE);
+    ram[0x1000] = 0xF4;                       /* entry: HLT */
+    ram[0x1200] = 0xF4;                       /* vector 0x30 handler: HLT */
+    ram[0xC0] = 0x00; ram[0xC1] = 0x12;       /* IVT[0x30].offset = 0x1200 */
+    ram[0xC2] = 0x00; ram[0xC3] = 0x00;       /* IVT[0x30].segment = 0 */
+
+    hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
+    line("hv_vm_create(HV_VM_ACCEL_APIC)", r);
+    if (r != HV_SUCCESS) { munmap(ram, RAM_SIZE); return; }
+    line("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    line("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) { hv_vm_destroy(); munmap(ram, RAM_SIZE); return; }
+    setupControls(v);
+    setupRealMode(v, 0x1000);
+    wreg(v, HV_X86_RFLAGS, 0x202);            /* real mode masks external interrupts when IF=0 */
+    wreg(v, HV_X86_TPR, 0);                   /* no priority mask in the APIC model */
+
+    hv_ioapic_state_ext_t io = { 0 };
+    r = hv_vm_ioapic_get_state(&io);
+    line("ioapic get_state (setup)", r);
+    if (r == HV_SUCCESS) {
+        io.state.rtbl[0] = 0x30;              /* vector 0x30, unmasked, physical destination */
+        io.state.ioregsel = 0x10;
+        line("ioapic put_state (setup)", hv_vm_ioapic_put_state(&io));
+    }
+    line("ioapic assert_irq(0)", hv_vm_ioapic_assert_irq(0));
+    r = hv_vcpu_run(v);
+    const uint64_t reason = rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF;
+    const uint64_t rip = rvmcs(v, VMCS_GUEST_RIP);
+    printf("  %-52s %s, exit %" PRIu64 ", RIP %#" PRIx64 " (%s)\n", "guest run with IRQ0 pending",
+           hvName(r), reason, rip, rip == 0x1200 ? "handler reached" : "entry HLT");
+    hv_vcpu_destroy(v);
+    hv_vm_destroy();
+    munmap(ram, RAM_SIZE);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -651,6 +696,10 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && strcmp(argv[1], "--apic") == 0) {
         probeApicFamily();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--apic-run") == 0) {
+        probeApicRun();
         return 0;
     }
 

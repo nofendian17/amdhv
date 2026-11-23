@@ -902,6 +902,12 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         }
         uint64_t pending = 0;
         const bool freeSlot = cpu->vmcsRead(0x4016, &pending) == kIOReturnSuccess && !(pending & (1ull << 31));
+        static volatile SInt32 injLogged;
+        if (OSIncrementAtomic(&injLogged) < 8)
+            AMDHV_INFO("APIC inject vcpu%u: ioapic irr=%#x pending=%u lapic irr0=%#x tpr=%#x free=%d cur=%#llx",
+                       v->id, v->vm->ioapic.irr, amdhv::apic::pendingVector(v->vm->ioapic),
+                       (unsigned)v->lapic.irr[0], v->lapic.tpr, freeSlot ? 1 : 0,
+                       (unsigned long long)pending);
         if (freeSlot) {
             const unsigned vec = amdhv::apic::takeInterrupt(v->lapic);
             if (vec)
