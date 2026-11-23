@@ -55,7 +55,8 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
 2. **Five `hv_vcpu_exit_*` helpers** answer `HV_ERROR` and never reach a trap. They are answered by
    Apple's userspace layer; no kext-side fix is known yet.
 3. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
-   a guest reading/writing `0xFEE00000` directly is not intercepted.
+   a guest reading/writing `0xFEE00000` directly is not intercepted. EOI is likewise not handled, so
+   an ISR bit set by injection stays set until `put_state` replaces the model.
 4. **PR #5** is still open; nothing here is claimed as full compatibility.
 
 ## Why no more reboot was requested

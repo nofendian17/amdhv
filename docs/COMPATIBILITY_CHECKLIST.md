@@ -17,7 +17,7 @@ Each row is marked with evidence, not intent. Status meanings:
 | **n/a** | Not applicable to this design. |
 
 Baseline used for this revision (2026-11-23, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
-AMDHV 0.2.0 + Phase 1): `make test` passes all 17 tests, `hvf-probe` prints `64 of 64` vCPUs with
+AMDHV 0.2.0 + Phase 1/3): `make test` passes all 17 tests, `hvf-probe` prints `64 of 64` vCPUs with
 `run_until(past deadline)` in microseconds, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
 `enableFailures`, `vmInvalidExits`, `assertFailures` and `vmFpuMismatches` at 0. Re-run those four
 after every change; a checklist row without evidence is a hypothesis. `amd-info info` reports 32768

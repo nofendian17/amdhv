@@ -23,7 +23,7 @@ colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longe
 ## Build
 
 ```bash
-make test          # 15 host tests, runs anywhere
+make test          # 17 host tests, runs anywhere
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
 
@@ -133,7 +133,7 @@ kext/          the kext: SVM, VMCB, VMRUN, nested page tables, the Hypervisor.fr
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
 tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
                hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
-tests/         the 15 host tests
+tests/         the 17 host tests
 scripts/       EFI install, symbol check, legacy QEMU boot test
 docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
                CAPABILITIES.md (API matrix),
