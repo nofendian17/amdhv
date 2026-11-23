@@ -238,22 +238,30 @@ The two Phase 1 changes are live-verified on the installed kext (UUID
 after a guest run and `set_shadow_access` answering `ok`. `make test` is 17/17, `hvf-smoke` passes,
 and `vmInvalidExits`, `assertFailures`, `enableFailures` and `vmFpuMismatches` stayed at zero.
 
-### 3.5 Phase 3, slice 1: APIC foundation (not yet live-verified)
+### 3.5 Phase 3, slices 1–2: APIC foundation and trap decoding (not yet live-verified)
 
-Most of the 34 refused calls never reach the provider at all: with a default VM Apple's framework
-answers `HV_UNSUPPORTED` in userspace. A follow-log capture of `hvf-probe --matrix` shows only
-`hv_vm_lapic_msi` reaching task trap 11 (arg `0x4000fee00000`) and the already handled task 8/9 and
-thread 8/9/12 calls. The gate is `hv_vm_create(HV_VM_ACCEL_APIC)`, which `tVmCreate` still refused.
+Most of the 34 refused calls never reach the provider with a default VM: Apple's framework answers
+them in userspace. With `amdhv_apic=1` the installed kext (`96635718-2CA9-31F4-A62A-580BA3B8AE04`)
+accepts `hv_vm_create(HV_VM_ACCEL_APIC)`, and the new `hvf-probe --apic` mode exercises the 32 APIC
+calls under such a VM. All still returned `HV_UNSUPPORTED` / `HV_ERROR`, as expected before handlers.
 
-This slice adds the host-testable register model (`kext/Source/ApicState.hpp`, `tests/apic_test.cpp`):
-LAPIC TPR/PPR/IRR/ISR arbitration, I/O APIC redirection and 8259A state, with layouts byte-for-byte
-matching `hv_apic_state`, `hv_ioapic_state` and `hv_atpic_state` (verified against the macOS 15 SDK).
+A follow-log capture of that run decoded the wire format:
 
-`tVmCreate` now accepts `HV_VM_ACCEL_APIC` only with boot-arg `amdhv_apic=1` (default 0), and records
-the choice on the VM. No APIC sub-op handler is wired yet, so a client that opts in will still get
-`HV_UNSUPPORTED` from those calls. The next slice uses the opt-in build to capture each sub-op's
-argument block, then connects the model to the traps. This is intentionally not advertised as
-support: the installed kext is still the Phase 1 build, and no live APIC result exists yet.
+| Trap | Observed encoding |
+| --- | --- |
+| task 10 | arg points to a word array; op codes `0x6a` lapic_set_intr, `0x6b`/`0x6c`/`0x6d` IOAPIC assert/deassert/pulse, `0x6f`/`0x70` IOAPIC read/write, `0x71`/`0x72` IOAPIC get/put state, `0x73` send interrupt, `0x74`–`0x79` AT-PIC assert/deassert/port read/port write/get state/put state, `0x7a` APIC bus frequency |
+| task 11 | `hv_vm_lapic_msi`: `(data << 32) | addr` (observed `0x4000fee00000`) |
+| thread 13 | per-vCPU sub-ops arrive as a tagged pointer (observed low bits `0`, `7`, `0xd7`); `logTrap` cannot `copyin` it, so a handler-side decode is needed |
+
+`ApicState.hpp` models LAPIC TPR/PPR/IRR/ISR, IOAPIC redirection and 8259A state, with layouts
+byte-for-byte matching the SDK state structs. This slice wires task traps 10 and 11 to that model
+(state get/put, mask/IRQ and redirect-table writes, MSI no-op) and adds a thread-13 handler that
+tries the raw and several masked blocks, logs the first readable one, and still answers
+`HV_UNSUPPORTED`.
+
+Nothing here is advertised as support: interrupt delivery into the guest is not wired, and the
+installed kext is still the previous build. The next reboot will confirm the task-10 handlers and
+reveal the thread-13 block layout.
 
 ---
 

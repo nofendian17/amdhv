@@ -331,11 +331,16 @@ most of them in userspace before any trap is reached. A follow-log capture of `h
 shows only `hv_vm_lapic_msi` reaching task trap 11; the gate is `hv_vm_create(HV_VM_ACCEL_APIC)`,
 which the provider refused.
 
-The first slice adds a host-testable register model (`kext/Source/ApicState.hpp`,
+The first slice added a host-testable register model (`kext/Source/ApicState.hpp`,
 `tests/apic_test.cpp`) whose LAPIC/IOAPIC/8259A layouts match the SDK state structs byte for byte.
-`tVmCreate` accepts `HV_VM_ACCEL_APIC` only with boot-arg `amdhv_apic=1` (default off) so a
-development build can reveal the argument blocks of the APIC sub-ops. No sub-op is implemented yet;
-nothing here is advertised as support, and no live APIC result exists.
+`tVmCreate` accepts `HV_VM_ACCEL_APIC` with boot-arg `amdhv_apic=1`; on the rebooted host that made
+the call return `ok`, and `hvf-probe --apic` exercised all 32 APIC calls under such a VM.
+
+A trap-log capture decoded task trap 10's op codes (`0x6a`–`0x7a` for LAPIC/IOAPIC/AT-PIC and bus
+frequency) and task 11's `(data << 32) | addr` MSI argument. Thread trap 13 passes a tagged pointer
+that the generic logger cannot read, so a handler-side decoder is needed. The next slice wires the
+task-10/11 model and adds that decoder. Nothing is advertised as support yet: the calls still answer
+`HV_UNSUPPORTED`, and delivery into the guest is not implemented.
 
 ## A framework quirk worth knowing
 

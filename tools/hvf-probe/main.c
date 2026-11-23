@@ -538,6 +538,87 @@ static void probeApiMatrix(void)
     munmap(ram, RAM_SIZE);
 }
 
+/* Exercise the in-kernel APIC family under a VM that actually asked for it. The provider logs each
+ * trap with its argument block, so this is the way to learn the sub-op encodings before wiring
+ * handlers. Run with `amd-info log -f` to capture them. */
+#define APIC(N, E)                                                              \
+    do {                                                                        \
+        hv_return_t rr = HV_SUCCESS;                                            \
+        for (int i = 0; i < 1000; i++)                                          \
+            rr = (E);                                                           \
+        line((N), rr);                                                          \
+    } while (0)
+
+static void probeApicFamily(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) {
+        perror("mmap");
+        return;
+    }
+    memset(ram, 0, RAM_SIZE);
+    printf("APIC family probe (HV_VM_ACCEL_APIC)\n");
+    hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
+    line("hv_vm_create(HV_VM_ACCEL_APIC)", r);
+    if (r != HV_SUCCESS) {
+        munmap(ram, RAM_SIZE);
+        return;
+    }
+    line("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    line("hv_vcpu_create", r);
+
+    uint32_t data = 0;
+    uint8_t byte = 0;
+    bool noSideEffect = false;
+    bool active[1] = { false };
+    bool valid = false, restart = false;
+    uint64_t rip = 0;
+    uint8_t vec = 0;
+    hv_apic_state_ext_t apic = { 0 };
+    hv_atpic_state_ext_t atpic = { 0 };
+    hv_ioapic_state_ext_t ioapic = { 0 };
+
+    APIC("hv_vm_atpic_assert_irq(0)", hv_vm_atpic_assert_irq(0));
+    APIC("hv_vm_atpic_deassert_irq(0)", hv_vm_atpic_deassert_irq(0));
+    APIC("hv_vm_atpic_port_read(0x21)", hv_vm_atpic_port_read(0x21, &byte));
+    APIC("hv_vm_atpic_port_write(0x21)", hv_vm_atpic_port_write(0x21, 0));
+    APIC("hv_vm_atpic_get_state", hv_vm_atpic_get_state(&atpic, true));
+    APIC("hv_vm_atpic_put_state", hv_vm_atpic_put_state(&atpic, true));
+    APIC("hv_vm_ioapic_assert_irq(0)", hv_vm_ioapic_assert_irq(0));
+    APIC("hv_vm_ioapic_deassert_irq(0)", hv_vm_ioapic_deassert_irq(0));
+    APIC("hv_vm_ioapic_pulse_irq(0)", hv_vm_ioapic_pulse_irq(0));
+    APIC("hv_vm_ioapic_read", hv_vm_ioapic_read(0xFEC00000, &data));
+    APIC("hv_vm_ioapic_write", hv_vm_ioapic_write(0xFEC00000, 0));
+    APIC("hv_vm_ioapic_get_state", hv_vm_ioapic_get_state(&ioapic));
+    APIC("hv_vm_ioapic_put_state", hv_vm_ioapic_put_state(&ioapic));
+    APIC("hv_vm_send_ioapic_intr", hv_vm_send_ioapic_intr(0x4000));
+    APIC("hv_vm_lapic_set_intr(0x20)", hv_vm_lapic_set_intr(v, 0x20, HV_APIC_EDGE_TRIGGER));
+    APIC("hv_vm_lapic_msi", hv_vm_lapic_msi(0xFEE00000, 0x4000));
+    APIC("hv_vm_set_apic_bus_freq", hv_vm_set_apic_bus_freq(1000000000));
+    if (r == HV_SUCCESS) {
+        APIC("hv_vcpu_inject_extint", hv_vcpu_inject_extint(v));
+        APIC("hv_vcpu_apic_read", hv_vcpu_apic_read(v, 0x80, &data));
+        APIC("hv_vcpu_apic_write", hv_vcpu_apic_write(v, 0x80, 0, &noSideEffect));
+        APIC("hv_vcpu_apic_get_state", hv_vcpu_apic_get_state(v, &apic));
+        APIC("hv_vcpu_apic_put_state", hv_vcpu_apic_put_state(v, &apic));
+        APIC("hv_vcpu_apic_ctrl", hv_vcpu_apic_ctrl(v, HV_APIC_CTRL_DEFAULT));
+        APIC("hv_vcpu_apic_trigger_lvt", hv_vcpu_apic_trigger_lvt(v, HV_APIC_LVT_FLAVOR_TIMER));
+        APIC("hv_vcpu_apic_lsc_enter_r32", hv_vcpu_apic_lsc_enter_r32(v, true, 0x1000, 1, 8, HV_X86_RAX, NULL, 0));
+        APIC("hv_vcpu_apic_lsc_enter_imm32", hv_vcpu_apic_lsc_enter_imm32(v, 0x1000, 1, 8, 0, NULL, 0));
+        APIC("hv_vcpu_apic_lsc_invalidate", hv_vcpu_apic_lsc_invalidate(v));
+        APIC("hv_vcpu_exit_init_ap", hv_vcpu_exit_init_ap(v, active, 1));
+        APIC("hv_vcpu_exit_startup_ap", hv_vcpu_exit_startup_ap(v, active, 1, &rip));
+        APIC("hv_vcpu_exit_ioapic_eoi", hv_vcpu_exit_ioapic_eoi(v, &vec));
+        APIC("hv_vcpu_exit_apic_access_read", hv_vcpu_exit_apic_access_read(v, &data));
+        APIC("hv_vcpu_exit_inject_excp", hv_vcpu_exit_inject_excp(v, &vec, &valid, &data, &restart));
+        hv_vcpu_destroy(v);
+    }
+    line("hv_vm_destroy", hv_vm_destroy());
+    munmap(ram, RAM_SIZE);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -566,6 +647,10 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && strcmp(argv[1], "--matrix") == 0) {
         probeApiMatrix();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--apic") == 0) {
+        probeApicFamily();
         return 0;
     }
 
