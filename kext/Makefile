@@ -6,12 +6,16 @@ OUT     := ../build
 KEXT    := $(OUT)/AMDHV.kext
 OBJDIR  := $(OUT)/kext-obj
 
-CXXSRC  := $(wildcard Source/*.cpp)
-CSRC    := $(wildcard Source/*.c)
-ASMSRC  := $(wildcard Source/*.S)
+# Sources are grouped by responsibility under Source/. Find them recursively.
+CXXSRC  := $(shell find Source -name '*.cpp' | sort)
+CSRC    := $(shell find Source -name '*.c' | sort)
+ASMSRC  := $(shell find Source -name '*.S' | sort)
 OBJS    := $(patsubst Source/%.cpp,$(OBJDIR)/%.o,$(CXXSRC)) \
            $(patsubst Source/%.c,$(OBJDIR)/%.o,$(CSRC)) \
            $(patsubst Source/%.S,$(OBJDIR)/%.o,$(ASMSRC))
+
+# Every group directory is on the include path, so headers keep short #includes.
+INCDIRS := $(shell find Source -type d | sort)
 
 # make DEBUG=1  ->  -O0 -g, AMDHV_DEBUG defined (kernel log level defaults to DEBUG)
 DEBUG   ?= 0
@@ -23,7 +27,7 @@ endif
 
 COMMON  := -arch x86_64 -isysroot $(SDK) -mmacosx-version-min=10.15 \
            -mkernel -nostdinc -nostdlibinc \
-           -I$(KFW)/Headers -I$(KFW)/PrivateHeaders \
+           -I$(KFW)/Headers -I$(KFW)/PrivateHeaders $(addprefix -I,$(INCDIRS)) \
            -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
            -Wall -Wextra $(OPT)
 
@@ -38,15 +42,15 @@ DEPS := $(OBJS:.o=.d)
 all: $(KEXT)
 
 $(OBJDIR)/%.o: Source/%.cpp
-	@mkdir -p $(OBJDIR)
+	@mkdir -p $(dir $@)
 	xcrun clang++ $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/%.o: Source/%.c
-	@mkdir -p $(OBJDIR)
+	@mkdir -p $(dir $@)
 	xcrun clang $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/%.o: Source/%.S
-	@mkdir -p $(OBJDIR)
+	@mkdir -p $(dir $@)
 	xcrun clang -arch x86_64 -isysroot $(SDK) -mmacosx-version-min=10.15 -c $< -o $@
 
 $(KEXT): $(OBJS) Info.plist
