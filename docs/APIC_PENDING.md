@@ -62,7 +62,11 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
    address equals the faulting GPA; the instruction is read from guest memory through
    `VmShared::guestBytes()`. Only LAPIC MMIO is wired — the I/O APIC page still goes to the client.
    EOI is likewise not handled, so an ISR bit set by injection stays set until `put_state` replaces
-   the model. `hvf-probe --apic-mmio` is the live check; it has not been run against this build yet.
+   the model.
+   Live check: with `amdhv_apic=1`, the guest MOV to `0xFEE00080` completes and the following HLT
+   exits at `RIP 0x1007`. EAX reads `0x160`, not the modelled TPR `0x55`: Apple's framework maps the
+   LAPIC page itself in an APIC-accelerated VM, so the NPF fallback did not fire. Treat the NPF path
+   as a safety net, not the primary APIC access route.
 5. **PR #5** is still open; nothing here is claimed as full compatibility.
 
 ## Why no more reboot was requested

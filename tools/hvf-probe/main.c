@@ -704,6 +704,9 @@ static void probeApicMmio(void)
     /* The front end mirrors HV_X86_TPR into the LAPIC model on every run, so this is enough to give
      * the emulated MMIO read a non-zero value. */
     line("write TPR", hv_vcpu_write_register(v, HV_X86_TPR, 0x55));
+    uint64_t tprRead = 0;
+    hv_vcpu_read_register(v, HV_X86_TPR, &tprRead);
+    printf("  %-52s %#llx\n", "  (TPR readback)", (unsigned long long)tprRead);
 
     uint64_t ripBefore = 0;
     hv_vcpu_read_register(v, HV_X86_RIP, &ripBefore);
@@ -716,7 +719,8 @@ static void probeApicMmio(void)
     hv_vcpu_read_register(v, HV_X86_RAX, &rax);
     printf("  %-52s %s, exit %" PRIu64 ", RIP %#" PRIx64 ", EAX %#" PRIx64 " (%s)\n",
            "guest MOV EAX,[LAPIC TPR]", hvName(r), rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF,
-           rip, rax, rip == 0x1007 && rax == 0x55 ? "emulated" : "client NPF");
+           rip, rax, rip == 0x1007 && (rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF) == 12
+               ? "instruction completed" : "unexpected exit");
     hv_vcpu_destroy(v);
     hv_vm_destroy();
     munmap(ram, RAM_SIZE);
