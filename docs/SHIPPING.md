@@ -85,3 +85,16 @@ No data migration is involved — guest disks belong to the clients, not AMDHV.
 - [ ] Failure counters still 0 after one hour of real guest use
 - [ ] Rollback kext (v0.2.0) and config backup verified present
 - [ ] Documentation: README boot-args table, CAPABILITIES, COMPATIBILITY_CHECKLIST, APIC_PENDING
+
+## 7. Client retest (2026-11-23, kext `FCF902DB`)
+
+| Client | Result | Evidence |
+| --- | --- | --- |
+| VZ via Kiri | **Pass** | `kiri daemon` + `com.apple.Virtualization.VirtualMachine` running; 4 containers healthy; `kiri exec fg-proxy …` printed `Linux 6.18.58 x86_64`; `kiri run --rm alpine:latest …` printed `RUN_GUEST_OK`. `vmExits` advanced by ~250k across the two runs, `vmInvalidExits` stayed 0. |
+| `kiri raw run` | **Excluded** | Failed before VM creation with `Invalid virtual machine configuration. The storage device attachment is invalid` (`vmCreates` unchanged) — a local Kiri config problem, not an AMDHV result. |
+| VirtualBox | **Blocked** | `/usr/local/bin/VBoxManage` wrapper exists but `/Applications/VirtualBox.app` is gone. |
+| QEMU `-accel hvf` | **Blocked** | No `qemu-system-x86_64` anywhere on this host. |
+| Android emulator | **Blocked** | No emulator binary/AVD installed. |
+
+`kern.hv_support=1`; failure counters remain 0; no new AMDHV panic since this boot (the only
+recent panic file is the older SMAP one from 17:16, already fixed and documented).
