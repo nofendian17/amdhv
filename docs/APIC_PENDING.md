@@ -59,7 +59,7 @@ would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are th
    a separate userspace project and is explicitly out of scope here. Do not add kext stubs for them —
    the calls never arrive.
 4. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
-   `kext/Source/ApicMmio.hpp` + `tests/apic_mmio_test.cpp` decode the two absolute MOV forms a guest uses
+   `kext/Source/arch/ApicMmio.hpp` + `tests/apic_mmio_test.cpp` decode the two absolute MOV forms a guest uses
    for absolute APIC accesses. The NPF path now uses that decoder, but only emulates when the decoded
    address equals the faulting GPA; the instruction is read from guest memory through
    `VmShared::guestBytes()`. Both the LAPIC page (`0xFEE00000`) and the I/O APIC IOREGSEL/IOWIN
