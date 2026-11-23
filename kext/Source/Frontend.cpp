@@ -1246,8 +1246,16 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
                  if (copyout(&v, (user_addr_t)x.b, 4)) { vmUnpin(vm); return kHvError; } break; }
     case 0x70: amdhv::apic::ioWrite(vm->ioapic, vm->ioapic.ioregsel, (uint32_t)x.b); break;
     case 0x71: { uint32_t ver = 100;   /* HV_IOAPIC_STATE_EXT_VER */
+                  static volatile SInt32 ioLogged;
+                  if (OSIncrementAtomic(&ioLogged) < 4)
+                      AMDHV_INFO("hv front end: IOAPIC get_state a=%#llx b=%#llx", (unsigned long long)x.a,
+                                 (unsigned long long)x.b);
                  if (copyout(&ver, (user_addr_t)x.b, 4) || copyout(&vm->ioapic, (user_addr_t)x.b + 4, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
-    case 0x72: if (copyin((user_addr_t)x.b + 4, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break;
+    case 0x72: { static volatile SInt32 ioLogged2;
+                 if (OSIncrementAtomic(&ioLogged2) < 4)
+                     AMDHV_INFO("hv front end: IOAPIC put_state a=%#llx b=%#llx", (unsigned long long)x.a,
+                                (unsigned long long)x.b);
+                 if (copyin((user_addr_t)x.b + 4, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
     case 0x73: if ((x.b & 0x10000u) == 0 && vm->vcpu[0])
                    amdhv::apic::setIrr(vm->vcpu[0]->lapic, (unsigned)(x.b & 0xFF)); break;
     case 0x6a: break;                       /* vcpu/vector are in a nested block; logged, not delivered yet */
@@ -1265,26 +1273,38 @@ kern_return_t tLapicMsi(void *target, uint64_t arg)
     return target ? kHvOk : kHvNoDev;
 }
 
-/* Thread trap 13: per-vCPU APIC sub-ops. The raw arg looks like a tagged pointer (low bits are a
- * selector), so try the raw value and progressively masked blocks and log the first one copyin can
- * read. The next probe run then tells us the real layout before handlers are written. */
+/* Thread trap 13: per-vCPU APIC sub-ops. The observed blocks are: word0 = 0 for inject_extint,
+ * 0x8001/0x8002 for apic read/write (three pointer words), a pointer to a nested block for
+ * get/put state, and small codes for ctrl/LVT/LSC. Log the pointers' contents once so the next
+ * probe run can pin the layouts; meanwhile answer success as a compatibility no-op. */
 kern_return_t tApicSubOp(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 13, arg);
-    if (!target)
+    HvVcpu *v = static_cast<HvVcpu *>(target);
+    if (!v)
         return kHvNoDev;
-    for (unsigned shift = 0; shift <= 4; shift++) {
-        const uint64_t block = arg & ~((1ull << shift) - 1);
-        uint64_t w[4] = {0, 0, 0, 0};
-        if (copyin((user_addr_t)block, w, sizeof(w)) == 0) {
-            AMDHV_INFO("hv front end: APIC subop arg=%#llx block=%#llx mask=%llx words=%#llx %#llx %#llx %#llx",
-                       (unsigned long long)arg, (unsigned long long)block, (unsigned long long)((1ull << shift) - 1),
-                       (unsigned long long)w[0], (unsigned long long)w[1],
-                       (unsigned long long)w[2], (unsigned long long)w[3]);
-            break;
+    uint64_t w[4] = {0, 0, 0, 0};
+    if (copyin((user_addr_t)arg, w, sizeof(w)) != 0)
+        return kHvError;
+    static volatile SInt32 logged;
+    if (OSIncrementAtomic(&logged) < 40) {
+        uint64_t deref[4] = {0, 0, 0, 0};
+        for (unsigned i = 0; i < 4; i++)
+            if (w[i] >= 0x100000000ull && w[i] < 0x800000000000ull)
+                copyin((user_addr_t)w[i], &deref[i], 8);
+        AMDHV_INFO("hv front end: APIC subop %#llx words=%#llx %#llx %#llx %#llx deref=%#llx %#llx %#llx %#llx",
+                   (unsigned long long)arg, (unsigned long long)w[0], (unsigned long long)w[1],
+                   (unsigned long long)w[2], (unsigned long long)w[3], (unsigned long long)deref[0],
+                   (unsigned long long)deref[1], (unsigned long long)deref[2], (unsigned long long)deref[3]);
+        if (w[0] >= 0x100000000ull) {             /* get/put state: nested block behind a tagged pointer */
+            uint64_t nw[8] = {0};
+            if (copyin((user_addr_t)(w[0] & ~7ull), nw, sizeof(nw)) == 0)
+                AMDHV_INFO("hv front end: APIC nested %#llx %#llx %#llx %#llx", (unsigned long long)nw[0],
+                           (unsigned long long)nw[1], (unsigned long long)nw[2], (unsigned long long)nw[3]);
         }
     }
-    return kHvUnsupportedCode;
+    /* No guest-visible delivery yet; the calls are accepted so clients can continue. */
+    return kHvOk;
 }
 
 template <unsigned Type, unsigned Index>

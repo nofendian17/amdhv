@@ -238,30 +238,24 @@ The two Phase 1 changes are live-verified on the installed kext (UUID
 after a guest run and `set_shadow_access` answering `ok`. `make test` is 17/17, `hvf-smoke` passes,
 and `vmInvalidExits`, `assertFailures`, `enableFailures` and `vmFpuMismatches` stayed at zero.
 
-### 3.5 Phase 3, slices 1–2: APIC foundation and trap decoding (not yet live-verified)
+### 3.5 Phase 3, slices 1–3: APIC foundation and trap decoding
 
-Most of the 34 refused calls never reach the provider with a default VM: Apple's framework answers
-them in userspace. With `amdhv_apic=1` the installed kext (`96635718-2CA9-31F4-A62A-580BA3B8AE04`)
-accepts `hv_vm_create(HV_VM_ACCEL_APIC)`, and the new `hvf-probe --apic` mode exercises the 32 APIC
-calls under such a VM. All still returned `HV_UNSUPPORTED` / `HV_ERROR`, as expected before handlers.
+With `amdhv_apic=1` the installed kext accepted `hv_vm_create(HV_VM_ACCEL_APIC)`, and
+`hvf-probe --apic` exercised the 32 APIC calls. After wiring task traps 10 and 11, the live run
+turned 17 of them to `ok`: all AT-PIC ops, IOAPIC assert/deassert/pulse/read/write and send-interrupt,
+`lapic_set_intr`, `lapic_msi` and `set_apic_bus_freq`. Two remain `HV_ERROR`: IOAPIC get/put state —
+the state pointer is not where the first handler looked, so a diagnostic was added.
 
-A follow-log capture of that run decoded the wire format:
-
-| Trap | Observed encoding |
-| --- | --- |
-| task 10 | arg points to a word array; op codes `0x6a` lapic_set_intr, `0x6b`/`0x6c`/`0x6d` IOAPIC assert/deassert/pulse, `0x6f`/`0x70` IOAPIC read/write, `0x71`/`0x72` IOAPIC get/put state, `0x73` send interrupt, `0x74`–`0x79` AT-PIC assert/deassert/port read/port write/get state/put state, `0x7a` APIC bus frequency |
-| task 11 | `hv_vm_lapic_msi`: `(data << 32) | addr` (observed `0x4000fee00000`) |
-| thread 13 | per-vCPU sub-ops arrive as a tagged pointer (observed low bits `0`, `7`, `0xd7`); `logTrap` cannot `copyin` it, so a handler-side decode is needed |
+Thread trap 13 passes a tagged pointer; the decoder logged these block layouts in order:
+`0` (`inject_extint`), `0x8001`/`0x8002` (apic read/write, three pointer words), a tagged pointer to
+a nested block (apic get/put state), `0x6` (ctrl), `0x107` (LVT trigger), and `0x5` (LSC enter with
+nested words / invalidate). The current build logs the pointed-to values and accepts the calls as
+no-ops so the next run can pin the layouts without another guess.
 
 `ApicState.hpp` models LAPIC TPR/PPR/IRR/ISR, IOAPIC redirection and 8259A state, with layouts
-byte-for-byte matching the SDK state structs. This slice wires task traps 10 and 11 to that model
-(state get/put, mask/IRQ and redirect-table writes, MSI no-op) and adds a thread-13 handler that
-tries the raw and several masked blocks, logs the first readable one, and still answers
-`HV_UNSUPPORTED`.
-
-Nothing here is advertised as support: interrupt delivery into the guest is not wired, and the
-installed kext is still the previous build. The next reboot will confirm the task-10 handlers and
-reveal the thread-13 block layout.
+byte-for-byte matching the SDK state structs. Delivery into the guest is still not wired, so none
+of this is advertised as support. The next reboot confirms the IOAPIC state fix and reveals the
+nested argument words.
 
 ---
 

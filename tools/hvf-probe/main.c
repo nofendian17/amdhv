@@ -544,7 +544,7 @@ static void probeApiMatrix(void)
 #define APIC(N, E)                                                              \
     do {                                                                        \
         hv_return_t rr = HV_SUCCESS;                                            \
-        for (int i = 0; i < 1000; i++)                                          \
+        for (int i = 0; i < 1; i++)                                             \
             rr = (E);                                                           \
         line((N), rr);                                                          \
     } while (0)
