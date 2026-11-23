@@ -17,6 +17,13 @@
 #define AMDHV_VM_CR_LOCK      (1ull << 3)
 #define AMDHV_VM_CR_SVMDIS    (1ull << 4)
 
+/**
+ * @brief Execute CPUID and store EAX/EBX/ECX/EDX.
+ *
+ * @param leaf CPUID leaf number.
+ * @param sub CPUID sub-leaf index.
+ * @param out Output array of four registers.
+ */
 static inline void amdhv_cpuid(uint32_t leaf, uint32_t sub, uint32_t out[4])
 {
     __asm__ volatile("cpuid"
@@ -24,6 +31,13 @@ static inline void amdhv_cpuid(uint32_t leaf, uint32_t sub, uint32_t out[4])
                      : "a"(leaf), "c"(sub));
 }
 
+/**
+ * @brief Read an MSR with RDMSR.
+ *
+ * @param msr MSR index.
+ *
+ * @return The uint64_t result.
+ */
 static inline uint64_t amdhv_rdmsr(uint32_t msr)
 {
     uint32_t lo, hi;
@@ -31,6 +45,12 @@ static inline uint64_t amdhv_rdmsr(uint32_t msr)
     return ((uint64_t)hi << 32) | lo;
 }
 
+/**
+ * @brief Write an MSR with WRMSR.
+ *
+ * @param msr MSR index.
+ * @param value Value to apply.
+ */
 static inline void amdhv_wrmsr(uint32_t msr, uint64_t value)
 {
     __asm__ volatile("wrmsr"
@@ -38,7 +58,7 @@ static inline void amdhv_wrmsr(uint32_t msr, uint64_t value)
                      : "c"(msr), "a"((uint32_t)value), "d"((uint32_t)(value >> 32)));
 }
 
-/* Debug registers. VMRUN loads and stores the guest's DR6 and DR7 but not DR0-DR3, and it does not keep the host's. */
+/** Debug registers. VMRUN loads and stores the guest's DR6 and DR7 but not DR0-DR3, and it does not keep the host's. */
 static inline uint64_t amdhv_read_dr(unsigned n)
 {
     uint64_t v = 0;
@@ -54,6 +74,12 @@ static inline uint64_t amdhv_read_dr(unsigned n)
     return v;
 }
 
+/**
+ * @brief Write a debug register.
+ *
+ * @param n Debug register index.
+ * @param v Value to write to the register.
+ */
 static inline void amdhv_write_dr(unsigned n, uint64_t v)
 {
     switch (n) {

@@ -20,7 +20,7 @@
 #include <IOKit/IOLocks.h>
 #include <libkern/c++/OSObject.h>
 
-#include "../../include/AMDHVShared.h"
+#include "../../../include/AMDHVShared.h"
 #include "FpuState.hpp"
 #include "ApicState.hpp"
 #include "Npt.hpp"

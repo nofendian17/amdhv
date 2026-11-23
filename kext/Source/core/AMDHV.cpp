@@ -15,12 +15,27 @@ OSDefineMetaClassAndStructors(com_amdhv_AMDHV, IOService)
 
 namespace {
 
+/**
+ * @brief Read a boolean boot-arg flag, defaulting to the given value.
+ *
+ * @param name Name of the symbol.
+ *
+ * @return The bool result.
+ */
 bool bootArgFlag(const char *name)
 {
     uint32_t v = 0;
     return PE_parse_boot_argn(name, &v, sizeof(v));
 }
 
+/**
+ * @brief Read a numeric boot-arg value into the output.
+ *
+ * @param name Name of the symbol.
+ * @param out Output array of four registers.
+ *
+ * @return The bool result.
+ */
 bool bootArgValue(const char *name, uint32_t *out)
 {
     return PE_parse_boot_argn(name, out, sizeof(*out));

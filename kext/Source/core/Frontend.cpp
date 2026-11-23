@@ -75,9 +75,13 @@ const char *const kThreadNames[kTraps] = {
     "set_space", "read_vmcs(slot)", "set_shadow_access", "set_apic_address", "set_msr_access", "sync_special_regs", "get_cap_write_vmcs",
     "apic(sub-op)", "?14", "?15"};
 
-/*
- * Logs the call, with the argument as a number and, when it looks like a user pointer that can be read, up to eight
- * words behind it. copyin() fails cleanly for a value that is not a readable address (a deadline, a mask, a slot).
+/**
+ * @brief Log a framework trap call with its argument.
+ *
+ * @param type Type selector.
+ * @param index Array index.
+ * @param arg Trap argument supplied by the framework.
+ * @param n Call sequence number for the log.
  */
 void logTrap(unsigned type, unsigned index, uint64_t arg, SInt32 n)
 {
@@ -149,6 +153,7 @@ bool gSupportSet = false;
 
 com_amdhv_AMDHV *gSvc = nullptr;     /* for the CPU info a vCPU object needs; set by start(), lives as long as the kext */
 
+/* ---- the framework-shaped VM and vCPU objects (mirrored shared-page layout) ---- */
 struct HvVm;
 struct HvVcpu {
     HvVm *vm;
@@ -192,8 +197,14 @@ struct HvVm {
     uint32_t nVcpus;
 };
 
+/** ---- VM/vCPU lifetime and shared-page setup ---- */
 inline uint32_t roundPage(uint32_t v) { return (v + 0xfffu) & ~0xfffu; }
 
+/**
+ * @brief Return the XSAVE area size required by the current XCR0.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t xsaveBytes()
 {
     uint32_t a = 0xd, b, c = 0, d;
@@ -203,7 +214,7 @@ uint32_t xsaveBytes()
     return c;
 }
 
-/* Every per-VM trap must pin the VM before touching it: tVmDestroy can otherwise free it mid-trap. */
+/** Every per-VM trap must pin the VM before touching it: tVmDestroy can otherwise free it mid-trap. */
 inline bool vmPin(HvVm *vm)
 {
     if (!vm)
@@ -218,6 +229,11 @@ inline bool vmPin(HvVm *vm)
     return true;
 }
 
+/**
+ * @brief Release a per-VM reference taken by a trap.
+ *
+ * @param vm Virtual machine object.
+ */
 inline void vmUnpin(HvVm *vm)
 {
     if (!vm)
@@ -228,6 +244,11 @@ inline void vmUnpin(HvVm *vm)
     IOLockUnlock(vm->lock);
 }
 
+/**
+ * @brief Free a VM and its per-vCPU state.
+ *
+ * @param vm Virtual machine object.
+ */
 void vmFree(HvVm *vm)
 {
     if (!vm)
@@ -253,7 +274,7 @@ void vmFree(HvVm *vm)
     OSDecrementAtomic(&gLiveVms);
 }
 
-/* Allocates the three areas, maps them into the calling task, fills the interface block. */
+/** Allocates the three areas, maps them into the calling task, fills the interface block. */
 HvVm *vmCreate(uint64_t *info)
 {
     HvVm *vm = (HvVm *)IOMallocZero(sizeof(HvVm));
@@ -329,6 +350,13 @@ HvVm *vmCreate(uint64_t *info)
 
 volatile SInt32 gTraceCount[2][16];
 
+/**
+ * @brief Record state.
+ *
+ * @param type Type selector.
+ * @param index Array index.
+ * @param arg Trap argument supplied by the framework.
+ */
 void note(unsigned type, unsigned index, uint64_t arg)
 {
     SInt32 n = OSIncrementAtomic((volatile SInt32 *)&gTraceCount[type][index]) + 1;
@@ -337,8 +365,16 @@ void note(unsigned type, unsigned index, uint64_t arg)
 }
 
 kern_return_t hvFromIo(IOReturn r);
+/**
+ * @brief Translate an IOReturn to a framework code during early setup.
+ *
+ * @param r IOReturn from the kext.
+ *
+ * @return The kern_return_t result.
+ */
 inline kern_return_t hvFromIoEarly(IOReturn r) { return hvFromIo(r); }
 
+/** ---- task traps: VM and vCPU creation/destruction ---- */
 kern_return_t tVmCreate(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 0, arg);
@@ -364,6 +400,14 @@ kern_return_t tVmCreate(void *target, uint64_t arg)
     return kHvOk;
 }
 
+/**
+ * @brief Vm Destroy.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVmDestroy(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 1, arg);
@@ -390,6 +434,14 @@ kern_return_t tVmDestroy(void *target, uint64_t arg)
 
 void fpuToPage(HvVcpu *v);
 
+/**
+ * @brief Vcpu Create.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVcpuCreate(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 12, arg);
@@ -478,6 +530,14 @@ kern_return_t tVcpuCreate(void *target, uint64_t arg)
     return kHvOk;
 }
 
+/**
+ * @brief Vcpu Destroy.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVcpuDestroy(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 5, arg);
@@ -502,14 +562,66 @@ kern_return_t tVcpuDestroy(void *target, uint64_t arg)
 }
 
 /* The cache words of a vCPU's rw slice. */
+/** ---- register / MSR cache helpers over the framework rw slice ---- */
 inline uint64_t *slotWord(HvVcpu *v, unsigned slot) { return reinterpret_cast<uint64_t *>(v->rw + 8 + slot * 8); }
+/**
+ * @brief Return the register-valid bitmap word for an index.
+ *
+ * @param v vCPU object.
+ * @param w Bitmap word index.
+ */
 inline uint64_t *validWord(HvVcpu *v, unsigned w) { return reinterpret_cast<uint64_t *>(v->rw + kRwValid + w * 8); }
+/**
+ * @brief Return the register-dirty bitmap word for an index.
+ *
+ * @param v vCPU object.
+ * @param w Bitmap word index.
+ */
 inline uint64_t *dirtyWord(HvVcpu *v, unsigned w) { return reinterpret_cast<uint64_t *>(v->rw + kRwDirty + w * 8); }
+/**
+ * @brief Return a pointer into the shared-page guest register array.
+ *
+ * @param v vCPU object.
+ * @param reg Register index.
+ */
 inline uint64_t *gprWord(HvVcpu *v, unsigned reg) { return reinterpret_cast<uint64_t *>(v->rw + kRwRegs + reg * 8); }
+/**
+ * @brief Mark a register slot as valid in the shared page.
+ *
+ * @param v vCPU object.
+ * @param slot Register or cache slot.
+ */
 inline void markValid(HvVcpu *v, unsigned slot) { *validWord(v, slot >> 6) |= 1ull << (slot & 63); }
+/**
+ * @brief Return the cached MSR-value word for an index.
+ *
+ * @param v vCPU object.
+ * @param idx Array index.
+ */
 inline uint64_t *msrValWord(HvVcpu *v, unsigned idx) { return reinterpret_cast<uint64_t *>(v->rw + kRwMsrVal + idx * 8); }
+/**
+ * @brief Return the MSR-valid bitmap word for an index.
+ *
+ * @param v vCPU object.
+ * @param w Bitmap word index.
+ */
 inline uint64_t *msrValidWord(HvVcpu *v, unsigned w) { return reinterpret_cast<uint64_t *>(v->rw + kRwMsrValid + w * 8); }
+/**
+ * @brief Check whether a value is cached for an MSR.
+ *
+ * @param v vCPU object.
+ * @param idx Array index.
+ *
+ * @return The bool result.
+ */
 inline bool msrIsValid(HvVcpu *v, unsigned idx) { return (*msrValidWord(v, idx >> 6) >> (idx & 63)) & 1; }
+/**
+ * @brief Set or clear the cached-valid bit of an MSR.
+ *
+ * @param v vCPU object.
+ * @param idx Array index.
+ * @param on Whether the feature is enabled.
+ */
 inline void msrSetValid(HvVcpu *v, unsigned idx, bool on)
 {
     if (on)
@@ -519,7 +631,7 @@ inline void msrSetValid(HvVcpu *v, unsigned idx, bool on)
 }
 constexpr unsigned R_XCR0 = 50, R_DR0 = 41, R_DR4 = 45, R_DR5 = 46, R_DR6 = 47;   /* registers kept in the page, by the framework's numbers */
 
-/* The core's FP state and XCR0 into the page: the ro FP array (what hv_vcpu_read_fpstate reads) and the XCR0 register. */
+/** The core's FP state and XCR0 into the page: the ro FP array (what hv_vcpu_read_fpstate reads) and the XCR0 register. */
 void fpuToPage(HvVcpu *v)
 {
     v->cpu->getFpu(&v->fpu);
@@ -530,6 +642,7 @@ void fpuToPage(HvVcpu *v)
 }
 
 /* Thread trap 7: the client read a slot that is not valid in its cache: ask the SVM core for the field and put it there. */
+/** ---- thread traps: registers, capabilities, TLB and managed MSRs ---- */
 kern_return_t tReadSlot(void *target, uint64_t slot)
 {
     note(HV_THREAD_TRAP, 7, slot);
@@ -548,7 +661,7 @@ kern_return_t tReadSlot(void *target, uint64_t slot)
     return kHvOk;
 }
 
-/* Thread trap 11: the client wants DR0..DR7 and the page does not have them current: read them from the core (DR7 is a VMCS slot, the client
+/** Thread trap 11: the client wants DR0..DR7 and the page does not have them current: read them from the core (DR7 is a VMCS slot, the client
  * gets it with the other slots; DR4 and DR5 alias DR6 and DR7). */
 kern_return_t tSyncSpecial(void *target, uint64_t arg)
 {
@@ -573,7 +686,7 @@ kern_return_t tSyncSpecial(void *target, uint64_t arg)
     return kHvOk;
 }
 
-/* Thread trap 12: capability of a writable field ("may be 0" / "may be 1" words). The control words of VMX have limits: the bits that must be 1
+/** Thread trap 12: capability of a writable field ("may be 0" / "may be 1" words). The control words of VMX have limits: the bits that must be 1
  * (allowed 0-settings, the low half of the capability word) and the bits that may be 1 (allowed 1-settings, the high half), the same numbers
  * hv_vmx_read_capability gives. Everything else (guest state, 64-bit fields) can be written freely. */
 kern_return_t tCapWrite(void *target, uint64_t slot)
@@ -598,6 +711,14 @@ kern_return_t tCapWrite(void *target, uint64_t slot)
     return kHvOk;
 }
 
+/**
+ * @brief Invalidate Tlb.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tInvalidateTlb(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 2, arg);
@@ -611,7 +732,7 @@ kern_return_t tInvalidateTlb(void *target, uint64_t arg)
 
 /* Managed MSRs (thread traps 3 enable, 4 disable, 10 set access): the guest uses the MSR natively; the client reads its value from the
  * per-vCPU list in the ro area. */
-/* MSRs the framework keeps in VMCS slots (indices 145..150: SYSENTER_CS/ESP/EIP, FS_BASE, GS_BASE, DEBUGCTL): their values already travel
+/** MSRs the framework keeps in VMCS slots (indices 145..150: SYSENTER_CS/ESP/EIP, FS_BASE, GS_BASE, DEBUGCTL): their values already travel
  * through the slot cache, only the guest's native access is switched here. Their bytes in the ro position table do not exist (they would
  * land on the synced flag and the mode byte), so nothing is written there. */
 uint32_t slotMsr(unsigned idx)
@@ -628,6 +749,14 @@ uint32_t slotMsr(unsigned idx)
     return 0;
 }
 
+/**
+ * @brief Enable framework-managed access to an MSR.
+ *
+ * @param v vCPU object.
+ * @param idx Array index.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t managedOn(HvVcpu *v, unsigned idx)
 {
     if (uint32_t sm = slotMsr(idx)) {
@@ -655,6 +784,14 @@ kern_return_t managedOn(HvVcpu *v, unsigned idx)
     return kHvOk;
 }
 
+/**
+ * @brief Disable framework-managed access to an MSR.
+ *
+ * @param v vCPU object.
+ * @param idx Array index.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t managedOff(HvVcpu *v, unsigned idx)
 {
     if (uint32_t sm = slotMsr(idx)) {
@@ -679,6 +816,14 @@ kern_return_t managedOff(HvVcpu *v, unsigned idx)
     return rc == kIOReturnSuccess ? kHvOk : hvFromIo(rc);
 }
 
+/**
+ * @brief Enable Managed.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param idx Array index.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tEnableManaged(void *target, uint64_t idx)
 {
     note(HV_THREAD_TRAP, 3, idx);
@@ -686,6 +831,14 @@ kern_return_t tEnableManaged(void *target, uint64_t idx)
     return v ? managedOn(v, (unsigned)idx) : kHvNoDev;
 }
 
+/**
+ * @brief Disable Managed.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param idx Array index.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tDisableManaged(void *target, uint64_t idx)
 {
     note(HV_THREAD_TRAP, 4, idx);
@@ -693,7 +846,7 @@ kern_return_t tDisableManaged(void *target, uint64_t idx)
     return v ? managedOff(v, (unsigned)idx) : kHvNoDev;
 }
 
-/* arg = (access << 32) | cache index; any access means "the guest uses it without exits". */
+/** arg = (access << 32) | cache index; any access means "the guest uses it without exits". */
 kern_return_t tSetMsrAccess(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 10, arg);
@@ -703,7 +856,7 @@ kern_return_t tSetMsrAccess(void *target, uint64_t arg)
     return (arg >> 32) ? managedOn(v, (unsigned)arg) : managedOff(v, (unsigned)arg);
 }
 
-/* hv_vm_sync_tsc: the guest sees `tsc` now; every vCPU gets the same offset. */
+/** hv_vm_sync_tsc: the guest sees `tsc` now; every vCPU gets the same offset. */
 kern_return_t tVmSyncTsc(void *target, uint64_t tsc)
 {
     note(HV_TASK_TRAP, 7, tsc);
@@ -725,6 +878,7 @@ kern_return_t tVmSyncTsc(void *target, uint64_t tsc)
 
 /* The general registers live in the page, indexed by the framework's register number. */
 enum { R_RAX = 2, R_RCX = 3, R_RDX = 4, R_RBX = 5, R_RSI = 6, R_RDI = 7, R_RSP = 8, R_RBP = 9, R_R8 = 10, R_CR2 = 38, R_TPR = 49 };
+/* ---- thread traps: the VMRUN loop ---- */
 constexpr unsigned kSlotRsp = 75, kSlotRip = 76, kSlotRflags = 77;
 
 const uint32_t kRunFields[AMDHV_RUN_NFIELDS] = {
@@ -733,6 +887,14 @@ const uint32_t kRunFields[AMDHV_RUN_NFIELDS] = {
 #undef AMDHV_X
 };
 
+/**
+ * @brief Enter the guest for one vCPU through the framework trap.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param deadline Absolute mach time deadline.
+ *
+ * @return The kern_return_t result.
+ */
 static kern_return_t vcpuRun(void *target, uint64_t deadline)
 {
     HvVcpu *v = static_cast<HvVcpu *>(target);
@@ -1041,17 +1203,27 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
     return kHvOk;
 }
 
+/**
+ * @brief Vcpu Run.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVcpuRun(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 0, arg);
     return vcpuRun(target, 0);
 }
 
-/*
- * hv_vcpu_run_until: arg is a mach_absolute_time deadline, HV_DEADLINE_FOREVER when the client wants the
- * plain run semantics. AMD has no VMX preemption timer, so the core clamps the deadline onto its 10 ms
- * slice and checks it at the exits it already takes (and before entering again). A client that asks for a
- * short wait still gets control back at the deadline instead of after the next unrelated exit.
+/**
+ * @brief Vcpu Run Until.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
  */
 kern_return_t tVcpuRunUntil(void *target, uint64_t arg)
 {
@@ -1061,7 +1233,7 @@ kern_return_t tVcpuRunUntil(void *target, uint64_t arg)
     return vcpuRun(target, deadline);
 }
 
-/* hv_vcpu_interrupt: `arg` is a mask of vCPU ids. */
+/** hv_vcpu_interrupt: `arg` is a mask of vCPU ids. */
 kern_return_t tVcpuInterrupt(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 13, arg);
@@ -1076,20 +1248,32 @@ kern_return_t tVcpuInterrupt(void *target, uint64_t arg)
     return kHvOk;
 }
 
-/* Callbacks the kernel makes. They must not log: `suspend` can run with interrupts off. A thread that dies leaves its vCPU to the
+/** Callbacks the kernel makes. They must not log: `suspend` can run with interrupts off. A thread that dies leaves its vCPU to the
  * task; the task's VM is freed with the task. */
 void cbNoopVcpu(void *) {}
+/**
+ * @brief No-op callback for volatile-state notifications.
+ */
 void cbNoopVolatile(void *, int) {}
+/**
+ * @brief Free a task VM when the owning task exits.
+ *
+ * @param vm Virtual machine object.
+ */
 void cbTaskDestroy(void *vm) { vmFree(static_cast<HvVm *>(vm)); }
 
-/* hv_suspend() runs on the boot CPU after the other CPUs are off and the APIC is shut down, so it
+/** hv_suspend() runs on the boot CPU after the other CPUs are off and the APIC is shut down, so it
  * cannot rendezvous or touch MSRs. It only closes the door on new guest entries; the PM notification
  * in AMDHV.cpp clears EFER.SVME/VM_HSAVE_PA while every CPU is still up. hv_resume() runs before the
  * APs are online, so it only moves the epoch that makes each vCPU reload its VMCB. */
 void cbHvSuspend(void) { amdhv::svm::noteSuspend(); }
+/**
+ * @brief Notify the SVM layer that the host resumed from sleep.
+ */
 void cbHvResume(void) { amdhv::svm::noteResume(); }
 
 /* IOReturn of the existing VM code -> the codes the framework expects. */
+/** ---- IOReturn -> Hypervisor.framework error codes ---- */
 kern_return_t hvFromIo(IOReturn r)
 {
     switch ((uint32_t)r) {
@@ -1115,8 +1299,18 @@ kern_return_t hvFromIo(IOReturn r)
 
 /* hv_vm_map_item_t: { space, uva, gpa, size, flags }, 40 bytes. Space 0 is the default address space; the
  * space API creates more (see tVmSpaceCreate). */
+/* ---- task traps: memory mapping and address spaces ---- */
 struct MapItem { uint64_t space, uva, gpa, size, flags; };
 
+/**
+ * @brief Map Item.
+ *
+ * @param vm Virtual machine object.
+ * @param arg Trap argument supplied by the framework.
+ * @param it Item to add.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t mapItem(HvVm *vm, uint64_t arg, MapItem *it)
 {
     if (!vm)
@@ -1128,7 +1322,7 @@ kern_return_t mapItem(HvVm *vm, uint64_t arg, MapItem *it)
     return kHvOk;
 }
 
-/* hv_vm_space_create: `arg` points at the hv_vm_space_t the framework hands back. */
+/** hv_vm_space_create: `arg` points at the hv_vm_space_t the framework hands back. */
 kern_return_t tVmSpaceCreate(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 2, arg);
@@ -1145,7 +1339,7 @@ kern_return_t tVmSpaceCreate(void *target, uint64_t arg)
     return k;
 }
 
-/* hv_vm_space_destroy: `arg` is the space ID itself. */
+/** hv_vm_space_destroy: `arg` is the space ID itself. */
 kern_return_t tVmSpaceDestroy(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 3, arg);
@@ -1157,6 +1351,14 @@ kern_return_t tVmSpaceDestroy(void *target, uint64_t arg)
     return k;
 }
 
+/**
+ * @brief Vm Map.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVmMap(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 4, arg);
@@ -1175,6 +1377,14 @@ kern_return_t tVmMap(void *target, uint64_t arg)
     return rc;
 }
 
+/**
+ * @brief Vm Unmap.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVmUnmap(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 5, arg);
@@ -1192,6 +1402,14 @@ kern_return_t tVmUnmap(void *target, uint64_t arg)
     return rc;
 }
 
+/**
+ * @brief Vm Protect.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tVmProtect(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 6, arg);
@@ -1209,7 +1427,7 @@ kern_return_t tVmProtect(void *target, uint64_t arg)
     return rc;
 }
 
-/* hv_vcpu_set_space: `arg` is the space ID (the vCPU is this thread's target). */
+/** hv_vcpu_set_space: `arg` is the space ID (the vCPU is this thread's target). */
 kern_return_t tSetSpace(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 6, arg);
@@ -1221,7 +1439,7 @@ kern_return_t tSetSpace(void *target, uint64_t arg)
     return hvFromIo(v->cpu->setSpace((uint32_t)arg));
 }
 
-/* hv_vmx_vcpu_set_apic_address: the client tells where its virtual-APIC page is when it uses the TPR shadow. The core keeps the TPR in V_TPR and
+/** hv_vmx_vcpu_set_apic_address: the client tells where its virtual-APIC page is when it uses the TPR shadow. The core keeps the TPR in V_TPR and
  * never reads that page, so there is nothing to remember; the argument block is not read, so a layout we do not know cannot hurt. */
 kern_return_t tSetApicAddress(void *target, uint64_t arg)
 {
@@ -1229,7 +1447,7 @@ kern_return_t tSetApicAddress(void *target, uint64_t arg)
     return target ? kHvOk : kHvNoDev;
 }
 
-/* hv_vmx_vcpu_set_shadow_access (thread trap 8): shadow-VMCS access bits have no SVM equivalent.
+/** hv_vmx_vcpu_set_shadow_access (thread trap 8): shadow-VMCS access bits have no SVM equivalent.
  * read/write_shadow_vmcs already round-trip in the framework's client-side area, so answer success
  * as a compatibility no-op, like the APIC address above. */
 kern_return_t tSetShadowAccess(void *target, uint64_t arg)
@@ -1241,8 +1459,17 @@ kern_return_t tSetShadowAccess(void *target, uint64_t arg)
 /* hv_vm_atpic, hv_vm_ioapic, hv_vm_lapic and hv_vm_set_apic_bus_freq arrive as one task trap with a
  * packed op code in the first word (the observed enum values are ASCII-ish sequential: 0x6a..0x7a).
  * The state lives in the VM; delivery into the guest is a later slice. */
+/* ---- task traps: APIC emulation controls ---- */
 struct ApicCtlArg { uint64_t op, a, b, c, d, e, f, g; };
 
+/**
+ * @brief Int Ctl.
+ *
+ * @param target Trap target supplied by the framework.
+ * @param arg Trap argument supplied by the framework.
+ *
+ * @return The kern_return_t result.
+ */
 kern_return_t tIntCtl(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 10, arg);
@@ -1285,14 +1512,14 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
     return kHvOk;
 }
 
-/* hv_vm_lapic_msi packs (data << 32) | addr. MSI routing into the guest is a later slice. */
+/** hv_vm_lapic_msi packs (data << 32) | addr. MSI routing into the guest is a later slice. */
 kern_return_t tLapicMsi(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 11, arg);
     return target ? kHvOk : kHvNoDev;
 }
 
-/* Thread trap 13: per-vCPU APIC sub-ops. Pointer words are shifted left by 8; the low byte is a
+/** Thread trap 13: per-vCPU APIC sub-ops. Pointer words are shifted left by 8; the low byte is a
  * tag (0x8001 apic_read, 0x8002 apic_write, 3 put_state, 4 get_state) or a small code for
  * ctrl/LVT/LSC. The SDK ext structs put state at +8 (after version and padding). */
 kern_return_t tApicSubOp(void *target, uint64_t arg)
@@ -1348,6 +1575,7 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
 }
 
 template <unsigned Type, unsigned Index>
+/** ---- traps this build intentionally does not implement ---- */
 kern_return_t stub(void *target, uint64_t arg)
 {
     (void)target;
@@ -1360,6 +1588,7 @@ kern_return_t stub(void *target, uint64_t arg)
 #define S(T, I) stub<T, I>
 /* Task traps: 0 vm_create, 1 vm_destroy, 2/3 space_create/destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc,
  * 12 vcpu_create, 13 vcpu_interrupt are real; the rest is logged and answered per mode. */
+/* ---- the tables xnu calls into ---- */
 const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, tVmSpaceCreate, tVmSpaceDestroy, tVmMap, tVmUnmap, tVmProtect,
                                       tVmSyncTsc, S(0, 8), S(0, 9), tIntCtl, tLapicMsi, tVcpuCreate, tVcpuInterrupt, S(0, 14),
                                       S(0, 15)};
@@ -1373,12 +1602,31 @@ const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb,
 
 } // namespace
 
+/* ---- registration, callbacks and the kern.hv_support write ---- */
+
 namespace amdhv {
 namespace hv {
 
+/**
+ * @brief Check whether the hypervisor trap tables are registered.
+ *
+ * @return The bool result.
+ */
 bool registered() { return gRegistered; }
+/**
+ * @brief Return the current front-end mode.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t mode() { return gRegistered ? gMode : 0; }
 
+/**
+ * @brief Set Tpr Shadow.
+ *
+ * @param on Whether the feature is enabled.
+ *
+ * @return The bool result.
+ */
 bool setTprShadow(bool on)
 {
     gTprShadow = on ? 1 : 0;
@@ -1386,9 +1634,24 @@ bool setTprShadow(bool on)
     return true;
 }
 
+/**
+ * @brief Check whether the TPR shadow is offered to new VMs.
+ *
+ * @return The bool result.
+ */
 bool tprShadow() { return gTprShadow != 0; }
+/**
+ * @brief Check whether the kext wrote kern.hv_support.
+ *
+ * @return The bool result.
+ */
 bool sysctlTaken() { return gSupportSet; }
 
+/**
+ * @brief Register the trap tables and callbacks in place of AppleHV.
+ *
+ * @return The bool result.
+ */
 static bool registerTraps()
 {
     /*
@@ -1428,6 +1691,13 @@ static bool registerTraps()
     return true;
 }
 
+/**
+ * @brief Set Mode.
+ *
+ * @param m MSR index.
+ *
+ * @return The bool result.
+ */
 bool setMode(uint32_t m)
 {
     if (m == 0) {
@@ -1458,12 +1728,12 @@ bool setMode(uint32_t m)
     return true;
 }
 
-/*
- * kern.hv_support is SYSCTL_INT(... &hv_support_available ...): an int in the kernel's data that is not exported to kexts, and its OID is permanent
- * (replacing the OID panicked the kernel, see the notes of the RyzenHV project). What a kext can do is write the int. Its address is the one the
- * kernel's own hv_get_support() uses, decoded from its code (`mov eax,[rip+disp32]`, matched byte for byte): that is the layout of the RUNNING
- * kernel. The independent check is the OID: after the write, sysctlbyname("kern.hv_support") must read 1 as well; if it does not, the old value is
- * put back and the address is refused.
+/**
+ * @brief Decode the address of hv_support_available from hv_get_support machine code.
+ *
+ * @param out Output array of four registers.
+ *
+ * @return The bool result.
  */
 bool addressFromCode(volatile int **out)
 {
@@ -1474,6 +1744,13 @@ bool addressFromCode(volatile int **out)
     return true;
 }
 
+/**
+ * @brief Read kern.hv_support through its sysctl OID.
+ *
+ * @param v Output for the integer value.
+ *
+ * @return The bool result.
+ */
 bool oidValue(int *v)
 {
     int x = -1;
@@ -1484,6 +1761,13 @@ bool oidValue(int *v)
     return true;
 }
 
+/**
+ * @brief Locate the kernel variable behind kern.hv_support.
+ *
+ * @param out Output array of four registers.
+ *
+ * @return The bool result.
+ */
 bool locateHvSupport(volatile int **out)
 {
     volatile int *fromCode = nullptr;
@@ -1496,6 +1780,13 @@ bool locateHvSupport(volatile int **out)
     return true;
 }
 
+/**
+ * @brief Set Sysctl.
+ *
+ * @param on Whether the feature is enabled.
+ *
+ * @return The bool result.
+ */
 bool setSysctl(bool on)
 {
     if (!on) {
@@ -1549,6 +1840,11 @@ bool setSysctl(bool on)
     return true;
 }
 
+/**
+ * @brief Start state.
+ *
+ * @param service Owning IOService.
+ */
 void start(com_amdhv_AMDHV *service)
 {
     gSvc = service;
@@ -1572,6 +1868,9 @@ void start(com_amdhv_AMDHV *service)
         setSysctl(true);
 }
 
+/**
+ * @brief Stop state.
+ */
 void stop()
 {
     setSysctl(false);

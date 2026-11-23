@@ -19,19 +19,19 @@
 namespace amdhv {
 namespace svm {
 
-/* VmRun may enter the guest only when no sleep is in progress and every usable CPU has SVM on. */
+/** VmRun may enter the guest only when no sleep is in progress and every usable CPU has SVM on. */
 static inline bool canEnterGuest(bool suspended, uint32_t activeCpus, uint32_t usableCpus)
 {
     return !suspended && activeCpus > 0 && activeCpus == usableCpus;
 }
 
-/* A VMCB built before the sleep must be reloaded in full after it. */
+/** A VMCB built before the sleep must be reloaded in full after it. */
 static inline bool needsReload(uint64_t vcpuEpoch, uint64_t sleepEpoch)
 {
     return vcpuEpoch != sleepEpoch;
 }
 
-/* First step of a suspend: refuse new guest entries, then tear the CPUs down. Idempotent, because the
+/** First step of a suspend: refuse new guest entries, then tear the CPUs down. Idempotent, because the
  * power-management notification and the kernel's hv_suspend() callback both report the same event. */
 static inline void beginSuspend(bool &suspended, uint64_t &epoch)
 {
@@ -41,13 +41,13 @@ static inline void beginSuspend(bool &suspended, uint64_t &epoch)
     }
 }
 
-/* The system is coming back but the CPUs are not re-enabled yet: only the epoch moves. */
+/** The system is coming back but the CPUs are not re-enabled yet: only the epoch moves. */
 static inline void noteWake(uint64_t &epoch)
 {
     __atomic_add_fetch(&epoch, 1, __ATOMIC_RELEASE);
 }
 
-/* Last step of a resume, after every usable CPU has SVM on again (or the attempt has finished). */
+/** Last step of a resume, after every usable CPU has SVM on again (or the attempt has finished). */
 static inline void endResume(bool &suspended, uint64_t &epoch)
 {
     if (suspended) {

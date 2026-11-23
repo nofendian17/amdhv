@@ -34,14 +34,16 @@ enum CleanBit : unsigned {
     CLEAN_NONE       = 32   /* not covered by a clean bit: always loaded */
 };
 
-static const uint32_t kAllCleanMask    = 0x0FFFu;   /* bits 0..11 */
-static const uint32_t kAlwaysDirtyMask = (1u << CLEAN_TPR) | (1u << CLEAN_CR2);
-static const uint32_t kCleanableMask   = kAllCleanMask & ~kAlwaysDirtyMask;
+constexpr uint32_t kAllCleanMask    = 0x0FFFu;   /* bits 0..11 */
+constexpr uint32_t kAlwaysDirtyMask = (1u << CLEAN_TPR) | (1u << CLEAN_CR2);
+constexpr uint32_t kCleanableMask   = kAllCleanMask & ~kAlwaysDirtyMask;
 
-/*
- * The clean-bit group of a byte offset in the whole 4 KiB VMCB (control area 0x000..0x3FF, state save
- * area 0x400..0xFFF). CLEAN_NONE for fields the processor always loads (RIP, RAX, RSP, RFLAGS, FS/GS,
- * LDTR/TR, event injection, ...).
+/**
+ * @brief Return the clean bit covering a VMCB control-field offset.
+ *
+ * @param off Byte offset.
+ *
+ * @return The CleanBit result.
  */
 static inline CleanBit cleanBitForOffset(unsigned off)
 {

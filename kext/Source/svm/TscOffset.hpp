@@ -15,7 +15,7 @@
 namespace amdhv {
 namespace tsc {
 
-/* VMCB.tscOffset so that guest TSC = rdtsc + result = hv_tsc_clock() + relative. */
+/** VMCB.tscOffset so that guest TSC = rdtsc + result = hv_tsc_clock() + relative. */
 inline uint64_t guestOffset(uint64_t clockBase, uint64_t clockAdjust, uint64_t relative)
 {
     return (clockAdjust - clockBase) + relative;

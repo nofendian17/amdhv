@@ -29,6 +29,14 @@ struct MmioOp {
     unsigned length;       /* instruction bytes consumed */
 };
 
+/**
+ * @brief Decode an absolute MOV to or from the local APIC MMIO range.
+ *
+ * @param code Instruction bytes.
+ * @param n Number of bytes.
+ *
+ * @return The MmioOp result.
+ */
 inline MmioOp decodeMmio(const uint8_t *code, size_t n)
 {
     MmioOp op = { false, false, 0, 0, 0 };
@@ -56,7 +64,7 @@ inline MmioOp decodeMmio(const uint8_t *code, size_t n)
     return op;
 }
 
-/* The register file offset of an APIC MMIO access within its 4 KiB page. */
+/** The register file offset of an APIC MMIO access within its 4 KiB page. */
 inline uint32_t mmioOffset(uint64_t gpa, uint64_t base)
 {
     return (gpa >= base && gpa < base + 0x1000) ? (uint32_t)(gpa - base) : 0xFFFFFFFFu;

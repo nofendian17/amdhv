@@ -40,7 +40,7 @@ const uint64_t E_US        = 1ull << 2;
 const uint64_t E_NX        = 1ull << 63;
 const uint64_t E_ADDR_MASK = 0x000FFFFFFFFFF000ull;
 
-/* x86 cannot express write-only or execute-only, so W and X imply R. Returns false for unknown bits. */
+/** x86 cannot express write-only or execute-only, so W and X imply R. Returns false for unknown bits. */
 static inline bool normalizePerm(uint32_t *p)
 {
     if (*p & ~PERM_MASK)
@@ -50,6 +50,14 @@ static inline bool normalizePerm(uint32_t *p)
     return true;
 }
 
+/**
+ * @brief Encode a host physical address and permissions as an NPT leaf.
+ *
+ * @param hpa Host physical address.
+ * @param perm Permission bits.
+ *
+ * @return The uint64_t result.
+ */
 static inline uint64_t encodeLeaf(uint64_t hpa, uint32_t perm)
 {
     uint64_t e = hpa & E_ADDR_MASK;
@@ -63,6 +71,13 @@ static inline uint64_t encodeLeaf(uint64_t hpa, uint32_t perm)
     return e;
 }
 
+/**
+ * @brief Decode the permissions of an NPT leaf.
+ *
+ * @param e Entry to inspect.
+ *
+ * @return The uint32_t result.
+ */
 static inline uint32_t decodeLeaf(uint64_t e)
 {
     if (!(e & E_P))
@@ -75,7 +90,7 @@ static inline uint32_t decodeLeaf(uint64_t e)
     return p;
 }
 
-/* Index into the table of `level` (4 = PML4 ... 1 = PT) for a guest physical address. */
+/** Index into the table of `level` (4 = PML4 ... 1 = PT) for a guest physical address. */
 static inline unsigned indexAt(uint64_t gpa, int level)
 {
     return (unsigned)((gpa >> (12 + 9 * (level - 1))) & 0x1FF);

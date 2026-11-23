@@ -3,7 +3,7 @@
 
 #include <IOKit/IOService.h>
 
-#include "../../include/AMDHVShared.h"
+#include "../../../include/AMDHVShared.h"
 
 /*
  * Root service of the kext. Matches on IOResources (see Info.plist), probes

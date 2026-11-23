@@ -19,7 +19,7 @@
 
 #include <stdint.h>
 #include <libkern/OSAtomic.h>
-#include "../../include/AMDHVShared.h"
+#include "../../../include/AMDHVShared.h"
 
 namespace amdhv {
 

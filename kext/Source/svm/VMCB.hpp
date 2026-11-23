@@ -196,10 +196,10 @@ enum : uint32_t {
 };
 
 /* control.intCtl */
-static const uint32_t INT_CTL_V_INTR_MASKING = 1u << 24;
+constexpr uint32_t INT_CTL_V_INTR_MASKING = 1u << 24;
 
 /* control.nestedCtl */
-static const uint64_t NESTED_CTL_NP_ENABLE = 1ull << 0;
+constexpr uint64_t NESTED_CTL_NP_ENABLE = 1ull << 0;
 
 /* control.tlbCtl */
 enum : uint8_t { TLB_DO_NOTHING = 0, TLB_FLUSH_ALL = 1, TLB_FLUSH_BY_ASID = 3 };
@@ -219,12 +219,14 @@ enum : uint64_t {
 };
 
 /* Guest EFER must have SVME set, otherwise VMRUN fails its consistency checks. */
-static const uint64_t EFER_SVME = 1ull << 12;
+constexpr uint64_t EFER_SVME = 1ull << 12;
 
-/*
- * VMCB segment attribute: a 12-bit field,
- *   0-3 type, 4 S, 5-6 DPL, 7 P, 8 AVL, 9 L, 10 D/B, 11 G.
- * Converts from the VMX/descriptor "access rights" layout (AVL/L/D/G at 12-15).
+/**
+ * @brief Encode a segment attribute word.
+ *
+ * @param accessRights VMX access-rights word.
+ *
+ * @return The uint16_t result.
  */
 static inline uint16_t segAttrib(uint32_t accessRights)
 {
@@ -232,10 +234,10 @@ static inline uint16_t segAttrib(uint32_t accessRights)
 }
 
 /* Real-mode segment: present, S=1, data read/write accessed (0x93) or code exec/read accessed (0x9B). */
-static const uint16_t ATTR_REAL_DATA = 0x93;
-static const uint16_t ATTR_REAL_CODE = 0x9B;
-static const uint16_t ATTR_LDT       = 0x82;
-static const uint16_t ATTR_TSS_BUSY  = 0x8B;
+constexpr uint16_t ATTR_REAL_DATA = 0x93;
+constexpr uint16_t ATTR_REAL_CODE = 0x9B;
+constexpr uint16_t ATTR_LDT       = 0x82;
+constexpr uint16_t ATTR_TSS_BUSY  = 0x8B;
 
 } // namespace vmcb
 } // namespace amdhv

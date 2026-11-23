@@ -4,7 +4,7 @@
 #ifndef AMDHV_SVM_HPP
 #define AMDHV_SVM_HPP
 
-#include "../../include/AMDHVShared.h"
+#include "../../../include/AMDHVShared.h"
 
 namespace amdhv {
 namespace svm {

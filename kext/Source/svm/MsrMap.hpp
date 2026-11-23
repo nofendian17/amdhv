@@ -52,6 +52,13 @@ struct Info {
 
 #define AMDHV_MSR_SAVE(member) ((uint16_t)(0x400 + offsetof(amdhv::vmcb::Save, member)))
 
+/**
+ * @brief Return the VMCB location and width of an MSR.
+ *
+ * @param msr MSR index.
+ *
+ * @return The Info result.
+ */
 static inline Info info(uint32_t msr)
 {
     using amdhv::vmcb::Save;
@@ -74,25 +81,24 @@ static inline Info info(uint32_t msr)
     }
 }
 
-/*
- * MSR_IA32_SPEC_CTRL (0x48) and MSR_IA32_PRED_CMD (0x49) are Intel-only. AMD has no such MSR, so
- * letting a guest execute RDMSR/WRMSR on them natively raises #GP in the guest (Linux then panics in
- * write_ibpb()). VZ asks to make them native; the kext reports success but keeps them intercepted
- * and emulates the access in run() instead.
+/**
+ * @brief Check whether an MSR is an Intel-only speculation MSR.
+ *
+ * @param msr MSR index.
+ *
+ * @return The bool result.
  */
 static inline bool intelOnlySpecMsr(uint32_t msr)
 {
     return msr == 0x48 || msr == 0x49;
 }
 
-/*
- * MSRs that must stay intercepted even when the client asks for native access
- * (hv_vcpu_enable_native_msr). The call still answers success; run() emulates the access instead:
+/**
+ * @brief Check whether an MSR must stay intercepted for host safety.
  *
- *   K_EFER  the guest EFER must keep SVME set, so it can never be written without an exit.
- *   K_TSC   SVM adds TSC_OFFSET on reads only (RDTSC/RDTSCP/RDMSR 10h). A native WRMSR 10h would
- *           write the *host* TSC, so the write must go through the offset, as msrOp() does.
- *   0x48/49 Intel-only speculation MSRs; AMD has no such MSR, so a native access would #GP.
+ * @param msr MSR index.
+ *
+ * @return The bool result.
  */
 static inline bool mustIntercept(uint32_t msr)
 {
@@ -101,12 +107,16 @@ static inline bool mustIntercept(uint32_t msr)
 }
 
 /* Is `msr` an address a guest could even write to the 8 KiB map? */
-static const size_t kMsrpmSize = 8192;
+constexpr size_t kMsrpmSize = 8192;
 
-/*
- * Position of the read-intercept bit of `msr` in the MSR permission map (AMD APM Vol. 2, 15.11): three ranges of
- * 8192 MSRs, 2 bits each (read, then write), 2 KiB per range. The write bit is the next one. Returns false for
- * MSRs outside the three ranges (those always intercept).
+/**
+ * @brief Map an MSR index to a bitmap byte and bit.
+ *
+ * @param msr MSR index.
+ * @param byteOffset Byte offset.
+ * @param bit Bit index.
+ *
+ * @return The bool result.
  */
 static inline bool msrpmBit(uint32_t msr, uint32_t *byteOffset, unsigned *bit)
 {
@@ -123,7 +133,7 @@ static inline bool msrpmBit(uint32_t msr, uint32_t *byteOffset, unsigned *bit)
     return true;
 }
 
-/* Make reads and writes of `msr` native (enable) or intercepted again. The map is all-ones when nothing is native. */
+/** Make reads and writes of `msr` native (enable) or intercepted again. The map is all-ones when nothing is native. */
 static inline bool setNative(uint8_t *msrpm, uint32_t msr, bool enable)
 {
     uint32_t off;
@@ -138,6 +148,14 @@ static inline bool setNative(uint8_t *msrpm, uint32_t msr, bool enable)
     return true;
 }
 
+/**
+ * @brief Check whether an MSR is marked native in the MSRPM.
+ *
+ * @param msrpm MSR permission bitmap.
+ * @param msr MSR index.
+ *
+ * @return The bool result.
+ */
 static inline bool isNative(const uint8_t *msrpm, uint32_t msr)
 {
     uint32_t off;

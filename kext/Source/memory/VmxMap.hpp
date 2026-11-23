@@ -41,7 +41,7 @@ static const FieldDesc kFields[] = {
 
 static const unsigned kNumFields = sizeof(kFields) / sizeof(kFields[0]);
 
-/* Index of `encoding` in kFields (sorted by encoding), or -1 when it is not a field the framework exposes. */
+/** Index of `encoding` in kFields (sorted by encoding), or -1 when it is not a field the framework exposes. */
 static inline int fieldIndex(uint32_t encoding)
 {
     unsigned lo = 0, hi = kNumFields;
@@ -57,7 +57,7 @@ static inline int fieldIndex(uint32_t encoding)
     return -1;
 }
 
-/* Bytes a field holds, from bits 14:13 of its encoding (Intel SDM Vol. 3, Appendix B). */
+/** Bytes a field holds, from bits 14:13 of its encoding (Intel SDM Vol. 3, Appendix B). */
 static inline unsigned fieldBytes(uint32_t encoding)
 {
     switch ((encoding >> 13) & 3) {
@@ -67,7 +67,7 @@ static inline unsigned fieldBytes(uint32_t encoding)
     }
 }
 
-/* Access type, bit 0: for 64-bit fields, "high" half. The framework only uses full accesses. */
+/** Access type, bit 0: for 64-bit fields, "high" half. The framework only uses full accesses. */
 static inline bool fieldIsHighHalf(uint32_t encoding) { return (encoding & 1) != 0; }
 
 /* How the kext keeps a field. */
@@ -88,6 +88,13 @@ enum : uint32_t {
     X_CR2 = 0xF000, X_DR6 = 0xF002, X_TPR = 0xF004,
     X_DR0 = 0xF010, X_DR1 = 0xF012, X_DR2 = 0xF014, X_DR3 = 0xF016
 };
+/**
+ * @brief Check whether Ext Field.
+ *
+ * @param enc VMCS field encoding.
+ *
+ * @return The bool result.
+ */
 static inline bool isExtField(uint32_t enc)
 {
     return enc == X_CR2 || enc == X_DR6 || enc == X_TPR || (enc >= X_DR0 && enc <= X_DR3 && !(enc & 1));
@@ -102,9 +109,12 @@ struct StateMap {
 #define AMDHV_SAVE_OFF(member) ((uint16_t)(0x400 + offsetof(amdhv::vmcb::Save, member)))
 #define AMDHV_CTL_OFF(member)  ((uint16_t)offsetof(amdhv::vmcb::Control, member))
 
-/*
- * Where does `encoding` live? Fields not listed here are KIND_SHADOW if they are valid VMCS fields.
- * Segment fields: selector 16-bit, limit 32-bit, base natural, AR 32-bit, all map to the same VMCB Seg.
+/**
+ * @brief Map Field.
+ *
+ * @param enc VMCS field encoding.
+ *
+ * @return The StateMap result.
  */
 static inline StateMap mapField(uint32_t enc)
 {
@@ -179,8 +189,15 @@ static inline StateMap mapField(uint32_t enc)
  * VMX access rights: 3:0 type, 4 S, 6:5 DPL, 7 P, 12 AVL, 13 L, 14 D/B, 15 G, 16 "unusable".
  * VMCB attrib (12 bits): 3:0 type, 4 S, 6:5 DPL, 7 P, 8 AVL, 9 L, 10 D/B, 11 G.
  */
-static const uint32_t AR_UNUSABLE = 1u << 16;
+constexpr uint32_t AR_UNUSABLE = 1u << 16;
 
+/**
+ * @brief Build x86 segment attribute bits from an SVM AR field.
+ *
+ * @param ar SVM segment AR field.
+ *
+ * @return The uint16_t result.
+ */
 static inline uint16_t attribFromAr(uint32_t ar)
 {
     if (ar & AR_UNUSABLE)
@@ -188,6 +205,13 @@ static inline uint16_t attribFromAr(uint32_t ar)
     return (uint16_t)((ar & 0xFF) | ((ar >> 4) & 0xF00));
 }
 
+/**
+ * @brief Decode an SVM AR field from x86 segment attributes.
+ *
+ * @param attrib Segment attribute bits.
+ *
+ * @return The uint32_t result.
+ */
 static inline uint32_t arFromAttrib(uint16_t attrib)
 {
     uint32_t ar = (uint32_t)(attrib & 0xFF) | ((uint32_t)(attrib & 0xF00) << 4);
@@ -211,11 +235,11 @@ enum ExitReason : uint32_t {
 };
 
 /* Bit 31 of the exit reason: the VM entry itself failed. */
-static const uint32_t VMX_ENTRY_FAILURE = 1u << 31;
+constexpr uint32_t VMX_ENTRY_FAILURE = 1u << 31;
 
 /* VM-exit interruption information (Intel SDM Vol. 3, 24.9.2). */
-static const uint32_t INTR_VALID      = 1u << 31;
-static const uint32_t INTR_ERRCODE    = 1u << 11;
+constexpr uint32_t INTR_VALID      = 1u << 31;
+constexpr uint32_t INTR_ERRCODE    = 1u << 11;
 enum IntrType : uint32_t { INTR_EXT = 0, INTR_NMI = 2, INTR_HW_EXC = 3, INTR_SW_INT = 4, INTR_SW_EXC = 6 };
 
 struct SvmExit {
@@ -236,15 +260,19 @@ struct VmxExit {
     uint64_t gpa;        /* VMCS_GUEST_PHYSICAL_ADDRESS, EPT violations */
 };
 
-/* Exceptions that push an error code: #DF, #TS, #NP, #SS, #GP, #PF, #AC, #CP. */
+/** Exceptions that push an error code: #DF, #TS, #NP, #SS, #GP, #PF, #AC, #CP. */
 static inline bool vectorHasErrorCode(unsigned v)
 {
     return v == 8 || (v >= 10 && v <= 14) || v == 17 || v == 21;
 }
 
-/*
- * Fills `out` for an SVM exit. Returns false when there is no VMX equivalent (the caller then injects #UD
- * for the SVM instructions, or treats it as an internal error).
+/**
+ * @brief Translate an SVM exit into the VMX-shaped view the framework expects.
+ *
+ * @param in Input structure.
+ * @param out Output array of four registers.
+ *
+ * @return The bool result.
  */
 static inline bool translateExit(const SvmExit &in, VmxExit *out)
 {

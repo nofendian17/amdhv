@@ -5,6 +5,14 @@
 
 namespace amdhv {
 
+/**
+ * @brief Allocate zeroed, wired, physically contiguous pages.
+ *
+ * @param m MSR index.
+ * @param size Size in bytes.
+ *
+ * @return The bool result.
+ */
 bool physAlloc(PhysMem *m, size_t size)
 {
     bzero(m, sizeof(*m));
@@ -40,6 +48,11 @@ bool physAlloc(PhysMem *m, size_t size)
     return true;
 }
 
+/**
+ * @brief Release pages allocated by physAlloc.
+ *
+ * @param m MSR index.
+ */
 void physFree(PhysMem *m)
 {
     if (m->md)

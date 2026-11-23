@@ -15,6 +15,11 @@
 namespace amdhv {
 namespace hv {
 
+/**
+ * @brief Locate the kern.hv_support variable in hv_get_support machine code.
+ *
+ * @param f Pointer to the function's machine code.
+ */
 inline const void *decodeSupportPtr(const uint8_t *f)
 {
     static const uint8_t kFrame[6] = {0x55, 0x48, 0x89, 0xe5, 0x8b, 0x05};

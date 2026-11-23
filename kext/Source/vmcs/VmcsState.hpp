@@ -94,22 +94,25 @@ enum : uint32_t { V4_RDTSCP_BIT = 1u << 7, V4_XSETBV_BIT = 1u << 13 };
 
 /* CR4.VMXE: Intel clients (QEMU's HVF backend) always set it in the guest CR4 and hide it with the CR4 mask/shadow. It
  * is reserved on AMD and makes VMRUN fail with VMEXIT_INVALID, so it never reaches the VMCB; the field remembers it. */
-static const uint64_t CR4_VMXE = 1ull << 13;
+constexpr uint64_t CR4_VMXE = 1ull << 13;
 /* CR0.NW without CD is illegal guest state on AMD (VMRUN fails with VMEXIT_INVALID); Intel accepts it in a VMCS, and
  * the Android emulator (QEMU's HVF backend) writes exactly that on reset. NW is kept in the field and dropped from the VMCB. */
-static const uint64_t CR0_NW = 1ull << 29;
-static const uint64_t CR0_CD = 1ull << 30;
-static const uint64_t EFER_LME = 1ull << 8;
-static const uint64_t EFER_LMA = 1ull << 10;
-static const uint32_t INT_CTL_V_IRQ = 1u << 8;
-static const uint32_t INT_CTL_V_IGN_TPR = 1u << 20;
+constexpr uint64_t CR0_NW = 1ull << 29;
+constexpr uint64_t CR0_CD = 1ull << 30;
+constexpr uint64_t EFER_LME = 1ull << 8;
+constexpr uint64_t EFER_LMA = 1ull << 10;
+constexpr uint32_t INT_CTL_V_IRQ = 1u << 8;
+constexpr uint32_t INT_CTL_V_IGN_TPR = 1u << 20;
 
 enum Result { R_OK = 0, R_INVALID_FIELD, R_READ_ONLY };
 
-/*
- * VM-entry interruption information -> VMCB EVENTINJ (low 32 bits). Returns 0 when nothing is to be injected.
- * VMX types: 0 external, 2 NMI, 3 hardware exception, 4 software interrupt, 5 privileged software exception,
- * 6 software exception. SVM types: 0 interrupt, 2 NMI, 3 exception, 4 software interrupt.
+/**
+ * @brief Translate a VMX event-injection word into the VMCB format.
+ *
+ * @param info Info word describing the exit.
+ * @param isSoftware Whether the exception is software-generated.
+ *
+ * @return The uint32_t result.
  */
 static inline uint32_t eventInjFromVmx(uint32_t info, bool *isSoftware)
 {

@@ -47,12 +47,19 @@ volatile bool             gReadMsrs = true;   /* set before the probe rendezvous
 bool                      gSuspended;
 uint64_t                  gSleepEpoch;          /* bumped on suspend/resume: see SleepPolicy.hpp */
 
+/**
+ * @brief Check whether a CPU can run SVM guests.
+ *
+ * @param p Page or pointer.
+ *
+ * @return The bool result.
+ */
 bool cpuUsable(const CpuProbe &p)
 {
     return p.vendorAmd && p.svmSupported && !p.svmDisabled;
 }
 
-/* gMaxIndex is raised by several CPUs at once, so a plain compare-and-store could lose the highest one. */
+/** gMaxIndex is raised by several CPUs at once, so a plain compare-and-store could lose the highest one. */
 void noteIndex(int cpu)
 {
     for (;;) {
@@ -62,9 +69,10 @@ void noteIndex(int cpu)
     }
 }
 
-/*
- * The *Action functions run on every CPU with interrupts disabled:
- * no allocation, no logging (not even AMDHV_*), no locks.
+/**
+ * @brief Probe SVM support on the current CPU.
+ *
+ * @param cpu CPU index.
  */
 void probeThisCpu(int cpu)
 {
@@ -108,6 +116,9 @@ void probeThisCpu(int cpu)
     p.eferSvme = (amdhv_rdmsr(AMDHV_MSR_EFER) & AMDHV_EFER_SVME) ? 1 : 0;
 }
 
+/**
+ * @brief Probe one framework API call and report its result.
+ */
 void probeAction(void *)
 {
     int cpu = cpu_number();
@@ -119,7 +130,7 @@ void probeAction(void *)
     probeThisCpu(cpu);
 }
 
-/* A later look at the CPUs: only the ones that were not probed yet. */
+/** A later look at the CPUs: only the ones that were not probed yet. */
 void rescanProbeAction(void *)
 {
     int cpu = cpu_number();
@@ -132,6 +143,9 @@ void rescanProbeAction(void *)
     probeThisCpu(cpu);
 }
 
+/**
+ * @brief Enable a CPU feature during the rescan.
+ */
 void enableAction(void *)
 {
     int cpu = cpu_number();
@@ -152,6 +166,9 @@ void enableAction(void *)
     OSIncrementAtomic(&gActive);
 }
 
+/**
+ * @brief Disable a CPU feature during the rescan.
+ */
 void disableAction(void *)
 {
     int cpu = cpu_number();
@@ -168,6 +185,9 @@ void disableAction(void *)
     gOn[cpu] = 0;
 }
 
+/**
+ * @brief Verify one CPU feature after enablement.
+ */
 void verifyAction(void *)
 {
     int cpu = cpu_number();
@@ -182,6 +202,13 @@ void verifyAction(void *)
     v.checked = 1;
 }
 
+/**
+ * @brief Allocate the host save state area for a CPU.
+ *
+ * @param cpu CPU index.
+ *
+ * @return The bool result.
+ */
 bool allocHostSave(uint32_t cpu)
 {
     /* One 4K page, physically contiguous, 4K aligned, below 2^52.
@@ -213,6 +240,9 @@ bool allocHostSave(uint32_t cpu)
     return true;
 }
 
+/**
+ * @brief Release Host Save.
+ */
 void freeHostSave()
 {
     for (uint32_t i = 0; i < AMDHV_MAX_CPUS; i++) {
@@ -224,6 +254,11 @@ void freeHostSave()
     }
 }
 
+/**
+ * @brief Count the CPUs that can run SVM guests.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t usableCount()
 {
     uint32_t n = 0;
@@ -239,6 +274,12 @@ uint32_t usableCount()
 namespace amdhv {
 namespace svm {
 
+/**
+ * @brief Probe the supported framework APIs.
+ *
+ * @param out Output array of four registers.
+ * @param readMsrs Whether to read MSRs.
+ */
 void probe(AMDHVInfo *out, bool readMsrs)
 {
     if (!gRescanLock)
@@ -293,6 +334,11 @@ void probe(AMDHVInfo *out, bool readMsrs)
     }
 }
 
+/**
+ * @brief Enable SVM on all usable CPUs.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t enableAll()
 {
     AMDHV_STAT_INC(enableCalls);
@@ -328,6 +374,9 @@ uint32_t enableAll()
     return active;
 }
 
+/**
+ * @brief Take all CPUs out of SVM mode.
+ */
 void disableAll()
 {
     AMDHV_STAT_INC(disableCalls);
@@ -343,6 +392,9 @@ void disableAll()
     freeHostSave();
 }
 
+/**
+ * @brief Record Suspend.
+ */
 void noteSuspend()
 {
     /* Probe-only and stopped kexts have nothing to tear down. Without this guard a suspend would
@@ -352,16 +404,27 @@ void noteSuspend()
     amdhv::svm::beginSuspend(gSuspended, gSleepEpoch);
 }
 
+/**
+ * @brief Record Resume.
+ */
 void noteResume()
 {
     amdhv::svm::noteWake(gSleepEpoch);
 }
 
+/**
+ * @brief Return the current sleep epoch.
+ *
+ * @return The uint64_t result.
+ */
 uint64_t sleepEpoch()
 {
     return __atomic_load_n(&gSleepEpoch, __ATOMIC_ACQUIRE);
 }
 
+/**
+ * @brief Notify the SVM layer that the system is suspending.
+ */
 void suspend()
 {
     /* Before the rendezvous, not after: see SleepPolicy.hpp. A vCPU that is about to call
@@ -377,6 +440,11 @@ void suspend()
     bzero(gOn, sizeof(gOn));
 }
 
+/**
+ * @brief Notify the SVM layer that the system has resumed.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t resume()
 {
     if (!gSuspended)
@@ -405,6 +473,14 @@ uint32_t resume()
     return active;
 }
 
+/**
+ * @brief Verify SVM state on every usable CPU.
+ *
+ * @param ok Success flag.
+ * @param total Total byte count.
+ *
+ * @return The bool result.
+ */
 bool verifyAll(uint32_t *ok, uint32_t *total)
 {
     *ok = 0;
@@ -442,16 +518,31 @@ bool verifyAll(uint32_t *ok, uint32_t *total)
     return true;
 }
 
+/**
+ * @brief Count the CPUs with SVM active.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t activeCpuCount()
 {
     return (uint32_t)gActive;
 }
 
+/**
+ * @brief Check whether SVM is active on every usable CPU.
+ *
+ * @return The bool result.
+ */
 bool activeOnAllUsable()
 {
     return canEnterGuest(gSuspended, (uint32_t)gActive, usableCount());
 }
 
+/**
+ * @brief Make sure SVM is enabled on the current CPU.
+ *
+ * @return The int result.
+ */
 int ensureThisCpu()
 {
     /* A suspend may be in progress on another CPU. Do not repair EFER.SVME/VM_HSAVE_PA now: the
@@ -484,21 +575,41 @@ int ensureThisCpu()
     return 1;
 }
 
+/**
+ * @brief Count the CPUs that were re-enabled after sleep.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t healedCount()
 {
     return (uint32_t)gHealed;
 }
 
+/**
+ * @brief Return the number of logical CPUs.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t cpuCount()
 {
     return gNCpus;
 }
 
+/**
+ * @brief Count the CPUs that support SVM.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t usableCpuCount()
 {
     return usableCount();
 }
 
+/**
+ * @brief Rescan CPU SVM capabilities and refresh per-CPU state.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t rescan()
 {
     if (!gRescanLock)

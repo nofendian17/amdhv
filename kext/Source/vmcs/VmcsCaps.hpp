@@ -62,6 +62,13 @@ enum : uint32_t {
     C_CPU_BASED2 = 0x401e
 };
 
+/**
+ * @brief Return a single-bit mask.
+ *
+ * @param n Bit index.
+ *
+ * @return The uint32_t result.
+ */
 constexpr uint32_t bit(unsigned n) { return 1u << n; }
 
 struct ControlCaps {
@@ -70,11 +77,10 @@ struct ControlCaps {
     uint32_t ignored;
 };
 
-/*
- * Pin-based controls. AMDHV always exits on external interrupts and NMIs (the host needs both), so
- * those are offered. Virtual NMIs, the preemption timer and posted interrupts are not implemented and
- * are not advertised, so a client that builds its controls from allowed1 never enables them. Older
- * clients that set those bits unconditionally are accepted as no-ops.
+/**
+ * @brief Return the pin-based execution control capabilities.
+ *
+ * @return The ControlCaps result.
  */
 constexpr ControlCaps pinBasedCaps()
 {
@@ -83,19 +89,12 @@ constexpr ControlCaps pinBasedCaps()
     return { must, may, bit(5) | bit(6) | bit(7) };
 }
 
-/*
- * Primary processor-based controls. The reserved bits Intel requires to be 1 keep the word shaped the
- * way clients expect. Unconditional I/O exiting is always on: Hypervisor.framework hands every port
- * access to the client. The TPR shadow is offered only while the boot-arg/user-client switch is on.
+/**
+ * @brief Return the primary execution control capabilities.
  *
- * Not advertised (accepted and ignored):
- *   21 use TPR shadow          when the switch is off
- *   25 use I/O bitmaps         all ports exit anyway
- *   27 monitor trap flag       no single-step exits
- *   28 use MSR bitmaps         all MSRs exit anyway
+ * @param tprShadow Whether the TPR shadow is offered.
  *
- * NMI-window exiting (22) stays advertised: Frontend.cpp answers it by reporting the window as open at
- * once, which is what the clients that use it (QEMU and VirtualBox) expect from this kext.
+ * @return The ControlCaps result.
  */
 constexpr ControlCaps procBasedCaps(bool tprShadow)
 {
@@ -110,12 +109,10 @@ constexpr ControlCaps procBasedCaps(bool tprShadow)
     return { must, may, ignored };
 }
 
-/*
- * Secondary processor-based controls. NPT (the AMD equivalent of EPT), RDTSCP, WBINVD exiting,
- * unrestricted real-mode guests and INVPCID are available. VPID is still not offered: the kext uses
- * SVM ASIDs internally (one per vCPU) and honors hv_vcpu_invalidate_tlb, but the Intel INVVPID model
- * that this capability word promises is not part of the API it implements. Accepting the bit remains
- * a compatibility no-op for clients that set it anyway.
+/**
+ * @brief Return the secondary execution control capabilities.
+ *
+ * @return The ControlCaps result.
  */
 constexpr ControlCaps procBased2Caps()
 {
@@ -124,16 +121,36 @@ constexpr ControlCaps procBased2Caps()
     return { must, may, bit(5) };                                        /* VPID: accepted, not offered */
 }
 
-/* VM-entry/exit controls: kept compatible with the Intel-shaped words clients already expect. */
+/** VM-entry/exit controls: kept compatible with the Intel-shaped words clients already expect. */
 constexpr ControlCaps entryCaps() { return { 0x000011ffu, 0x0000d3ffu, 0 }; }
+/**
+ * @brief Return the VM-exit control capability bits.
+ *
+ * @return The ControlCaps result.
+ */
 constexpr ControlCaps exitCaps() { return { 0x00036dffu, 0x003fefffu, 0 }; }
 
+/**
+ * @brief Check whether a VMCS field is an execution control field.
+ *
+ * @param field VMCS field encoding.
+ *
+ * @return The bool result.
+ */
 constexpr bool isControlField(uint32_t field)
 {
     return field == C_PIN_BASED || field == C_CPU_BASED || field == C_CPU_BASED2 ||
            field == C_VMENTRY_CONTROLS || field == C_VMEXIT_CONTROLS;
 }
 
+/**
+ * @brief Return the must-one, may-one and ignored bits of a control field.
+ *
+ * @param field VMCS field encoding.
+ * @param tprShadow Whether the TPR shadow is offered.
+ *
+ * @return The ControlCaps result.
+ */
 constexpr ControlCaps controlCaps(uint32_t field, bool tprShadow)
 {
     switch (field) {
@@ -146,6 +163,13 @@ constexpr ControlCaps controlCaps(uint32_t field, bool tprShadow)
     }
 }
 
+/**
+ * @brief Map a VMCS control field to its capability index.
+ *
+ * @param field VMCS field encoding.
+ *
+ * @return The int result.
+ */
 constexpr int capIndexForControl(uint32_t field)
 {
     switch (field) {
@@ -158,12 +182,19 @@ constexpr int capIndexForControl(uint32_t field)
     }
 }
 
+/**
+ * @brief Return a capability word by index.
+ *
+ * @param c Callee context.
+ *
+ * @return The uint64_t result.
+ */
 constexpr uint64_t capWord(ControlCaps c)
 {
     return (uint64_t)c.mustOne | ((uint64_t)c.mayOne << 32);
 }
 
-/* The 64-bit word hv_vmx_read_capability(index) returns. */
+/** The 64-bit word hv_vmx_read_capability(index) returns. */
 constexpr uint64_t capability(unsigned index, bool tprShadow)
 {
     switch (index) {
@@ -190,7 +221,7 @@ constexpr uint64_t capability(unsigned index, bool tprShadow)
     }
 }
 
-/* True when every bit of `value` is either advertised or an accepted no-op. */
+/** True when every bit of `value` is either advertised or an accepted no-op. */
 constexpr bool controlAllowed(uint32_t field, uint64_t value, bool tprShadow)
 {
     if (!isControlField(field))
@@ -199,7 +230,7 @@ constexpr bool controlAllowed(uint32_t field, uint64_t value, bool tprShadow)
     return ((uint32_t)value & ~(c.mayOne | c.ignored)) == 0;
 }
 
-/* Bits of a control write that were accepted but have no effect (for one-time diagnostics). */
+/** Bits of a control write that were accepted but have no effect (for one-time diagnostics). */
 constexpr uint32_t ignoredControlBits(uint32_t field, uint64_t value, bool tprShadow)
 {
     if (!isControlField(field))

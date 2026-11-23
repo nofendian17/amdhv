@@ -53,6 +53,11 @@ struct IoApicState {
     uint32_t ioregsel;
 };
 
+/**
+ * @brief Reset the object to a clean state.
+ *
+ * @param s State object to operate on.
+ */
 inline void reset(LapicState &s)
 {
     for (unsigned i = 0; i < 8; i++)
@@ -66,6 +71,11 @@ inline void reset(LapicState &s)
     s.boot_state = 0;
 }
 
+/**
+ * @brief Reset the object to a clean state.
+ *
+ * @param s State object to operate on.
+ */
 inline void reset(AtpicState &s)
 {
     s.ready = s.icw_num = s.rd_cmd_reg = 0;
@@ -76,6 +86,11 @@ inline void reset(AtpicState &s)
     s.intr_raised = s.elc = 0;
 }
 
+/**
+ * @brief Reset the object to a clean state.
+ *
+ * @param s State object to operate on.
+ */
 inline void reset(IoApicState &s)
 {
     for (unsigned i = 0; i < 32; i++)
@@ -83,9 +98,16 @@ inline void reset(IoApicState &s)
     s.irr = s.ioa_id = s.ioregsel = 0;
 }
 
+/**
+ * @brief Return the task-priority class of the current TPR.
+ *
+ * @param s State object to operate on.
+ *
+ * @return The unsigned result.
+ */
 inline unsigned tprClass(const LapicState &s) { return (s.tpr >> 4) & 0xF; }
 
-/* Highest ISR class currently in service; the PPR is the larger of it and the TPR class. */
+/** Highest ISR class currently in service; the PPR is the larger of it and the TPR class. */
 inline unsigned highestBit32(uint32_t v)
 {
     for (int bit = 31; bit >= 0; bit--)
@@ -94,6 +116,13 @@ inline unsigned highestBit32(uint32_t v)
     return 0;
 }
 
+/**
+ * @brief Return the highest-priority vector currently in service.
+ *
+ * @param s State object to operate on.
+ *
+ * @return The unsigned result.
+ */
 inline unsigned highestIsrVector(const LapicState &s)
 {
     for (int i = 7; i >= 0; i--)
@@ -102,12 +131,25 @@ inline unsigned highestIsrVector(const LapicState &s)
     return 0;                            /* no vector in service */
 }
 
+/**
+ * @brief Return the processor-priority class of the LAPIC.
+ *
+ * @param s State object to operate on.
+ *
+ * @return The unsigned result.
+ */
 inline unsigned pprClass(const LapicState &s)
 {
     const unsigned inService = highestIsrVector(s) / 16;
     return tprClass(s) > inService ? tprClass(s) : inService;
 }
 
+/**
+ * @brief Mark an interrupt request pending in the IRR.
+ *
+ * @param s State object to operate on.
+ * @param vector Interrupt vector.
+ */
 inline void setIrr(LapicState &s, unsigned vector)
 {
     if (vector < 16 || vector > 255)
@@ -115,6 +157,12 @@ inline void setIrr(LapicState &s, unsigned vector)
     s.irr[vector / 32] |= 1u << (vector & 31);
 }
 
+/**
+ * @brief Clear an interrupt from the ISR after an EOI.
+ *
+ * @param s State object to operate on.
+ * @param vector Interrupt vector.
+ */
 inline void setEoi(LapicState &s, unsigned vector)
 {
     if (vector < 16 || vector > 255)
@@ -122,7 +170,7 @@ inline void setEoi(LapicState &s, unsigned vector)
     s.isr[vector / 32] &= ~(1u << (vector & 31));
 }
 
-/* Moves the highest-priority IRR entry above the PPR into ISR: the interrupt the core may inject. */
+/** Moves the highest-priority IRR entry above the PPR into ISR: the interrupt the core may inject. */
 inline unsigned takeInterrupt(LapicState &s)
 {
     for (int i = 7; i >= 0; i--) {
@@ -141,7 +189,7 @@ inline unsigned takeInterrupt(LapicState &s)
     return 0;
 }
 
-/* MMIO view of the LAPIC register file used by hv_vcpu_apic_read/write. Offsets the state struct
+/** MMIO view of the LAPIC register file used by hv_vcpu_apic_read/write. Offsets the state struct
  * does not model are accepted but read as zero; the fields a guest actually uses are mapped. */
 inline uint32_t readReg(const LapicState &s, uint32_t off)
 {
@@ -159,6 +207,13 @@ inline uint32_t readReg(const LapicState &s, uint32_t off)
     return 0;
 }
 
+/**
+ * @brief Write Reg.
+ *
+ * @param s State object to operate on.
+ * @param off Byte offset.
+ * @param value Value to apply.
+ */
 inline void writeReg(LapicState &s, uint32_t off, uint32_t value)
 {
     if (off == 0x080) s.tpr = value;
@@ -173,7 +228,7 @@ inline void writeReg(LapicState &s, uint32_t off, uint32_t value)
     else if (off >= 0x320 && off <= 0x370 && ((off - 0x320) & 0xF) == 0) s.lvt[(off - 0x320) >> 4] = value;
 }
 
-/* Encode/decode into a KERNEL buffer. The caller then uses copyout/copyin for the user pointer:
+/** Encode/decode into a KERNEL buffer. The caller then uses copyout/copyin for the user pointer:
  * memcpy straight to userspace faults under SMAP. */
 inline void encodeState(const LapicState &s, void *kernelExt)
 {
@@ -182,6 +237,14 @@ inline void encodeState(const LapicState &s, void *kernelExt)
     memcpy((uint8_t *)kernelExt + 8, &s, sizeof(s));
 }
 
+/**
+ * @brief Decode the kernel-provided APIC state blob.
+ *
+ * @param s State object to operate on.
+ * @param kernelExt Kernel-provided extended state blob.
+ *
+ * @return The bool result.
+ */
 inline bool decodeState(LapicState &s, const void *kernelExt)
 {
     uint32_t ver = 0;
@@ -192,7 +255,7 @@ inline bool decodeState(LapicState &s, const void *kernelExt)
     return true;
 }
 
-/* Highest unmasked 8259A request, translated to an interrupt vector via ICW2's base. */
+/** Highest unmasked 8259A request, translated to an interrupt vector via ICW2's base. */
 inline unsigned atpicPending(const AtpicState &s)
 {
     const uint8_t pending = s.request & ~s.mask & ~s.service;
@@ -201,7 +264,7 @@ inline unsigned atpicPending(const AtpicState &s)
     return (unsigned)s.irq_base + highestBit32(pending);
 }
 
-/* I/O APIC redirect-table access through the IOREGSEL/IOWIN pair. */
+/** I/O APIC redirect-table access through the IOREGSEL/IOWIN pair. */
 inline uint32_t ioRead(const IoApicState &s, uint32_t sel)
 {
     if (sel == 0x00)
@@ -217,6 +280,13 @@ inline uint32_t ioRead(const IoApicState &s, uint32_t sel)
     return 0;
 }
 
+/**
+ * @brief Write a register of the I/O APIC redirect table.
+ *
+ * @param s State object to operate on.
+ * @param sel I/O APIC register selector.
+ * @param value Value to apply.
+ */
 inline void ioWrite(IoApicState &s, uint32_t sel, uint32_t value)
 {
     if (sel == 0x00)
@@ -230,19 +300,31 @@ inline void ioWrite(IoApicState &s, uint32_t sel, uint32_t value)
     }
 }
 
+/**
+ * @brief Assert an I/O APIC input line.
+ *
+ * @param s State object to operate on.
+ * @param intin I/O APIC input line.
+ */
 inline void assertIrq(IoApicState &s, unsigned intin)
 {
     if (intin < 32)
         s.irr |= 1u << intin;
 }
 
+/**
+ * @brief Deassert an I/O APIC input line.
+ *
+ * @param s State object to operate on.
+ * @param intin I/O APIC input line.
+ */
 inline void deassertIrq(IoApicState &s, unsigned intin)
 {
     if (intin < 32)
         s.irr &= ~(1u << intin);
 }
 
-/* Highest unmasked redirected interrupt, or 0. Bit 16 of a low entry is the mask bit. */
+/** Highest unmasked redirected interrupt, or 0. Bit 16 of a low entry is the mask bit. */
 inline unsigned pendingVector(const IoApicState &s)
 {
     unsigned best = 0;

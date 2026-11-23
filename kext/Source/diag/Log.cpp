@@ -4,7 +4,7 @@
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
 
-#include "../../include/AMDRing.h"
+#include "../../../include/AMDRing.h"
 #include "KernelDecls.hpp"
 #include "Log.hpp"
 
@@ -41,6 +41,12 @@ const char kLevelChar[] = { '-', 'E', 'W', 'I', 'D', 'T' };
  */
 volatile SInt32 gLogInFlight[AMDHV_MAX_CPUS];
 
+/**
+ * @brief Append a formatted line to the kernel log ring.
+ *
+ * @param line Source line number.
+ * @param len Length in bytes.
+ */
 void ringAppend(const char *line, uint32_t len)
 {
     if (!gLock)
@@ -61,6 +67,14 @@ void ringAppend(const char *line, uint32_t len)
         OSDecrementAtomic(&gLogInFlight[cpu]);
 }
 
+/**
+ * @brief Write bytes into the framework shared page.
+ *
+ * @param level Page-table level (4 = PML4, 1 = PT).
+ * @param sync Whether to wait for completion.
+ * @param fmt printf-style format string.
+ * @param ap Argument pointer.
+ */
 void vwrite(uint32_t level, bool sync, const char *fmt, va_list ap)
 {
     if (!sync && level > gLevel)
@@ -97,6 +111,9 @@ void vwrite(uint32_t level, bool sync, const char *fmt, va_list ap)
 
 } // namespace
 
+/**
+ * @brief Initialise the object after allocation.
+ */
 void init()
 {
     if (!gLock) {
@@ -112,6 +129,12 @@ void init()
         gIoLogLevel = v;
 }
 
+/**
+ * @brief Write state.
+ *
+ * @param level Page-table level (4 = PML4, 1 = PT).
+ * @param fmt printf-style format string.
+ */
 void write(uint32_t level, const char *fmt, ...)
 {
     va_list ap;
@@ -120,6 +143,11 @@ void write(uint32_t level, const char *fmt, ...)
     va_end(ap);
 }
 
+/**
+ * @brief Write Sync.
+ *
+ * @param fmt printf-style format string.
+ */
 void writeSync(const char *fmt, ...)
 {
     va_list ap;
@@ -128,12 +156,25 @@ void writeSync(const char *fmt, ...)
     va_end(ap);
 }
 
+/**
+ * @brief Record a failed assertion in the kernel log.
+ *
+ * @param expr Failed assertion expression.
+ * @param file Source file name.
+ * @param line Source line number.
+ */
 void assertFailed(const char *expr, const char *file, int line)
 {
     AMDHV_ERR("ASSERT FAILED: %s (%s:%d)", expr, file, line);
     OSIncrementAtomic64((volatile SInt64 *)&gStats.assertFailures);
 }
 
+/**
+ * @brief Read state.
+ *
+ * @param cursor Current byte offset.
+ * @param out Output array of four registers.
+ */
 void read(uint64_t cursor, AMDHVLogChunk *out)
 {
     bzero(out, sizeof(*out));
@@ -157,12 +198,22 @@ void read(uint64_t cursor, AMDHVLogChunk *out)
         OSDecrementAtomic(&gLogInFlight[cpu]);
 }
 
+/**
+ * @brief Set Level.
+ *
+ * @param level Page-table level (4 = PML4, 1 = PT).
+ */
 void setLevel(uint32_t level)
 {
     if (level <= AMDHV_LOG_TRACE)
         gLevel = level;
 }
 
+/**
+ * @brief Return the nesting level of a page-table node.
+ *
+ * @return The uint32_t result.
+ */
 uint32_t level()
 {
     return gLevel;

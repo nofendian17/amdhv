@@ -29,6 +29,13 @@ struct TlbState {
     int      runCpu;        /* CPU of this entry */
 };
 
+/**
+ * @brief Choose the VMCB TLB_CONTROL value for this guest entry.
+ *
+ * @param s State object to operate on.
+ *
+ * @return The uint8_t result.
+ */
 static inline uint8_t tlbControl(const TlbState &s)
 {
     if (!s.asidMode || !s.haveAsid)

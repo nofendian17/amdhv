@@ -15,17 +15,20 @@
 namespace amdhv {
 namespace run {
 
-/*
- * `sliceEnd` is the end of the core's own timeslice; `clientDeadline` is the run_until deadline, or
- * 0 for "no client deadline" (hv_vcpu_run / HV_DEADLINE_FOREVER). The result is never later than
- * sliceEnd, so a client cannot keep a host CPU longer than the slice.
+/**
+ * @brief Choose the earlier of the time-slice end and the client deadline.
+ *
+ * @param sliceEnd End of the core's timeslice.
+ * @param clientDeadline Client-supplied run deadline.
+ *
+ * @return The uint64_t result.
  */
 inline uint64_t stopTime(uint64_t sliceEnd, uint64_t clientDeadline)
 {
     return (clientDeadline != 0 && clientDeadline < sliceEnd) ? clientDeadline : sliceEnd;
 }
 
-/* True once `now` has reached `stop`: do not enter (or re-enter) the guest. */
+/** True once `now` has reached `stop`: do not enter (or re-enter) the guest. */
 inline bool expired(uint64_t now, uint64_t stop) { return now >= stop; }
 
 } // namespace run
