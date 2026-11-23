@@ -1,0 +1,64 @@
+# APIC work: consolidated status (no further reboot requested yet)
+
+This file collects everything learned so far so the remaining work can land in **one** kext build
+and be checked in **one** reboot. The current tree already contains all fixes except the final
+argument decoder, which is present but unverified.
+
+## Verified on live boots
+
+| Item | Result |
+| --- | --- |
+| `hv_vm_create(HV_VM_ACCEL_APIC)` with `amdhv_apic=1` | `ok` |
+| Task trap 10 op codes | `0x6a`–`0x7a` mapped; AT-PIC/IOAPIC/LAPIC state, IRQ, MSI, bus frequency |
+| Task trap 11 | `hv_vm_lapic_msi` = `(data << 32) | addr` |
+| `hv_ioapic_state_ext_t` layout | `version(4) + pad(4) + state(272)` → state at `+8`, **not** `+4` |
+| `hv_apic_state_ext_t` layout | state at `+8`; `hv_atpic_state_ext_t` state at `+4` |
+| Guest interrupt delivery | `--apic-run`: IRQ0 → vector `0x30`, guest exits at handler RIP `0x1200` |
+| SMAP panic | caused by `memcpy` to a user pointer in get_state; fixed with `copyout`/`copyin` via a kernel buffer |
+| Failures after last reboot | `vmInvalidExits`, `assertFailures`, `enableFailures`, `vmFpuMismatches` = 0 |
+| Full probe | `79 of 79`, `hvf-smoke` `PASS`, `make test` 17/17 |
+
+## Decoded thread-13 wire format
+
+Pointer words are shifted left 8; low byte is a tag:
+
+| Tag | Call | Notes |
+| --- | --- | --- |
+| `0` | `hv_vcpu_inject_extint` | no vector supplied |
+| `0x8001` | `hv_vcpu_apic_read` | `p1` = result, `p2`/`p3` = argument chain |
+| `0x8002` | `hv_vcpu_apic_write` | `p1` = bool, `p2` = offset chain, `p3` = value chain |
+| `0xe003` | `hv_vcpu_apic_put_state` | pointer = `w0 >> 8`; ext state at `+8` |
+| `0xe004` | `hv_vcpu_apic_get_state` | same |
+| `0x0006` | `hv_vcpu_apic_ctrl` | controls behind `p1` |
+| `0x0107` | `hv_vcpu_apic_trigger_lvt` | no vector supplied |
+| `0x0005` | LSC enter / invalidate | no-op |
+
+Observed pointer chain for `apic_write` (run at uptime 60s):
+
+```
+p2 = 0x7ff7bacc5bc0 -> inner 0x7ff7bacc5d80
+p3 = 0x7ff7bacc5ae0 -> inner 0x7ff7bacc5b50
+single deref: off = 0xbacc5d80, val = 0xbacc5b80   (pointer low halves)
+double deref: off = 0, val = 0xbacc5b80            (still a pointer low half)
+```
+
+Conclusion: the offset/value sit deeper in a pointer chain. The current code follows up to five
+`copyin` levels and stops at the first value below `0x100000`. It has **not** been verified on a
+reboot after this change.
+
+## Still open
+
+1. **Verify the five-level decoder** with one reboot: run `hvf-probe --apic` and check
+   `(apic TPR round-trip)` becomes `write=0 read=0 val=0x55`. If it still fails, the log line for
+   unknown sub-ops will show a new tag; do not guess again.
+2. **Five `hv_vcpu_exit_*` helpers** answer `HV_ERROR` and never reach a trap. They are answered by
+   Apple's userspace layer; no kext-side fix is known yet.
+3. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
+   a guest reading/writing `0xFEE00000` directly is not intercepted.
+4. **PR #5** is still open; nothing here is claimed as full compatibility.
+
+## Why no more reboot was requested
+
+The last debug builds each needed a reboot to learn one more pointer level. All that information is
+now consolidated here and in the tree, so the next reboot is for one combined verification, not for
+another discovery step.

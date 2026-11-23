@@ -355,6 +355,10 @@ register model, but that path caused an SMAP panic when it copied straight to a 
 rebuilt with `copyout`/`copyin` through a kernel buffer and still needs a reboot to be re-verified.
 Guest-visible routing is exercised only for the 8259A/IOAPIC → LAPIC IRR path above.
 
+Limited to the 8259A/IOAPIC → LAPIC IRR path. See [APIC_PENDING.md](APIC_PENDING.md) for the
+decoded wire format, the verified results, and the single remaining verification step; no further
+reboot is requested until that batch is ready.
+
 ## A framework quirk worth knowing
 
 Calling `hv_vm_create` a second time in one task answers `HV_BUSY` (correct), but then

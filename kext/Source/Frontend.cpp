@@ -902,12 +902,6 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         }
         uint64_t pending = 0;
         const bool freeSlot = cpu->vmcsRead(0x4016, &pending) == kIOReturnSuccess && !(pending & (1ull << 31));
-        static volatile SInt32 injLogged;
-        if (OSIncrementAtomic(&injLogged) < 8)
-            AMDHV_INFO("APIC inject vcpu%u: ioapic irr=%#x pending=%u lapic irr0=%#x tpr=%#x free=%d cur=%#llx",
-                       v->id, v->vm->ioapic.irr, amdhv::apic::pendingVector(v->vm->ioapic),
-                       (unsigned)v->lapic.irr[0], v->lapic.tpr, freeSlot ? 1 : 0,
-                       (unsigned long long)pending);
         if (freeSlot) {
             const unsigned vec = amdhv::apic::takeInterrupt(v->lapic);
             if (vec)
@@ -1277,16 +1271,9 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
                  if (copyout(&v, (user_addr_t)x.b, 4)) { vmUnpin(vm); return kHvError; } break; }
     case 0x70: amdhv::apic::ioWrite(vm->ioapic, vm->ioapic.ioregsel, (uint32_t)x.b); break;
     case 0x71: { uint32_t ver = 100;   /* HV_IOAPIC_STATE_EXT_VER */
-                  static volatile SInt32 ioLogged;
-                  if (OSIncrementAtomic(&ioLogged) < 4)
-                      AMDHV_INFO("hv front end: IOAPIC get_state a=%#llx b=%#llx", (unsigned long long)x.a,
-                                 (unsigned long long)x.b);
-                 if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
-    case 0x72: { static volatile SInt32 ioLogged2;
-                 if (OSIncrementAtomic(&ioLogged2) < 4)
-                     AMDHV_INFO("hv front end: IOAPIC put_state a=%#llx b=%#llx", (unsigned long long)x.a,
-                                (unsigned long long)x.b);
-                 if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
+                  /* the state pointer is in a; b is a framework cookie; state begins at +8 */
+                  if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
+    case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break;
     case 0x73: if ((x.b & 0x10000u) == 0 && vm->vcpu[0])
                    amdhv::apic::setIrr(vm->vcpu[0]->lapic, (unsigned)(x.b & 0xFF)); break;
     case 0x6a: break;                       /* vcpu/vector are in a nested block; logged, not delivered yet */
@@ -1319,19 +1306,15 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     const unsigned code = (unsigned)w[0] & 0xFFFF;
     const user_addr_t p1 = (user_addr_t)(w[1] >> 8), p2 = (user_addr_t)(w[2] >> 8),
                       p3 = (user_addr_t)(w[3] >> 8);
-    /* p2/p3 are pointers to pointers: the first word holds a user address whose low half the old
-     * single deref returned as a bogus "offset" (0xb9814d80). Follow both levels. */
+    /* Argument words are tagged pointers (shifted left 8). The offset/value live behind a chain of
+     * pointer words; follow up to five levels and stop at the first small integer. */
     auto arg4 = [](user_addr_t slot, uint64_t *out) -> int {
         user_addr_t p = slot;
         uint64_t v = 0;
-        static volatile SInt32 logged;
         for (unsigned level = 0; level < 5; level++) {
             if (copyin(p, &v, sizeof(v)))
                 return 1;
-            if (OSIncrementAtomic(&logged) < 24)
-                AMDHV_INFO("hv front end: apic arg level%u %#llx -> %#llx", level,
-                           (unsigned long long)p, (unsigned long long)v);
-            if (v < 0x100000ull) {                    /* a small integer: the offset or value itself */
+            if (v < 0x100000ull) {
                 *out = v;
                 return 0;
             }
@@ -1346,25 +1329,15 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     switch (code) {
     case 0x8001: {                                   /* apic_read: result, offset */
         uint64_t off = 0;
-        const int e = arg4(p2, &off);
-        static volatile SInt32 logged;
-        if (OSIncrementAtomic(&logged) < 8)
-            AMDHV_INFO("hv front end: apic_read p1=%#llx p2=%#llx p3=%#llx off=%#llx e=%d",
-                       (unsigned long long)p1, (unsigned long long)p2, (unsigned long long)p3,
-                       (unsigned long long)off, e);
-        if (e) return kHvError;
+        if (arg4(p2, &off))
+            return kHvError;
         const uint32_t val = amdhv::apic::readReg(v->lapic, (uint32_t)off);
         return copyout(&val, p1, 4) ? kHvError : kHvOk;
     }
     case 0x8002: {                                   /* apic_write: no-side-effect, offset, value */
         uint64_t off = 0, val = 0;
-        const int e1 = arg4(p2, &off), e2 = arg4(p3, &val);
-        static volatile SInt32 logged2;
-        if (OSIncrementAtomic(&logged2) < 8)
-            AMDHV_INFO("hv front end: apic_write p1=%#llx p2=%#llx p3=%#llx off=%#llx val=%#llx e=%d/%d",
-                       (unsigned long long)p1, (unsigned long long)p2, (unsigned long long)p3,
-                       (unsigned long long)off, (unsigned long long)val, e1, e2);
-        if (e1 || e2) return kHvError;
+        if (arg4(p2, &off) || arg4(p3, &val))
+            return kHvError;
         amdhv::apic::writeReg(v->lapic, (uint32_t)off, (uint32_t)val);
         const uint8_t noSideEffect = 1;
         if (p1 && copyout(&noSideEffect, p1, 1))
@@ -1384,13 +1357,13 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
         amdhv::apic::encodeState(v->lapic, buf);
         return copyout(buf, (user_addr_t)(w[0] >> 8), sizeof(buf)) ? kHvError : kHvOk;
     }
-    case 0x0006: {                                   /* apic_ctrl: controls pointer */
+    case 0x0006: {                                   /* apic_ctrl */
         uint64_t ctrls = 0;
         if (p1 && arg8(p1, &ctrls) == 0)
             v->lapic.apic_controls = ctrls;
         return kHvOk;
     }
-    case 0x0107:                                     /* trigger_lvt: no vector supplied by the framework */
+    case 0x0107:                                     /* trigger_lvt */
     case 0x0005:                                     /* LSC enter / invalidate */
     case 0x0000:                                     /* inject_extint */
         return kHvOk;
