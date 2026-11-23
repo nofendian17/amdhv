@@ -241,21 +241,24 @@ and `vmInvalidExits`, `assertFailures`, `enableFailures` and `vmFpuMismatches` s
 ### 3.5 Phase 3, slices 1–3: APIC foundation and trap decoding
 
 With `amdhv_apic=1` the installed kext accepted `hv_vm_create(HV_VM_ACCEL_APIC)`, and
-`hvf-probe --apic` exercised the 32 APIC calls. After wiring task traps 10 and 11, the live run
-turned 17 of them to `ok`: all AT-PIC ops, IOAPIC assert/deassert/pulse/read/write and send-interrupt,
-`lapic_set_intr`, `lapic_msi` and `set_apic_bus_freq`. Two remain `HV_ERROR`: IOAPIC get/put state —
-the state pointer is not where the first handler looked, so a diagnostic was added.
+`hvf-probe --apic` exercised the 32 APIC calls. The live run on the latest installed build returned
+`ok` for 27 of them: every AT-PIC op, IOAPIC assert/deassert/pulse/read/write and send-interrupt,
+`lapic_set_intr`, `lapic_msi`, `set_apic_bus_freq`, and all ten per-vCPU thread-13 calls
+(`inject_extint`, `apic_read/write/get_state/put_state/ctrl/trigger_lvt`, the two LSC enters and
+`lsc_invalidate`). Five `hv_vcpu_exit_*` helpers still answer `HV_ERROR`; they do not reach a trap
+and appear to be answered by Apple's userspace layer.
 
-Thread trap 13 passes a tagged pointer; the decoder logged these block layouts in order:
-`0` (`inject_extint`), `0x8001`/`0x8002` (apic read/write, three pointer words), a tagged pointer to
-a nested block (apic get/put state), `0x6` (ctrl), `0x107` (LVT trigger), and `0x5` (LSC enter with
-nested words / invalidate). The current build logs the pointed-to values and accepts the calls as
-no-ops so the next run can pin the layouts without another guess.
+Two calls remain broken in that build: IOAPIC get/put state. The diagnostic showed the framework
+puts the state pointer in the arg block's `a` word (`0x7ff7...`) and a cookie in `b`
+(`0x6daa0aab09840009`); the handler had used `b`. The fix is in this tree and needs a reboot to
+confirm. Thread-13 blocks are logged as no-ops: `0` (inject_extint), `0x8001`/`0x8002` (apic
+read/write, three pointer words), a tagged pointer to a nested block (get/put state), `0x6` (ctrl),
+`0x107` (LVT trigger), `0x5` (LSC enter/invalidate). Their nested contents are still not decoded.
 
 `ApicState.hpp` models LAPIC TPR/PPR/IRR/ISR, IOAPIC redirection and 8259A state, with layouts
 byte-for-byte matching the SDK state structs. Delivery into the guest is still not wired, so none
-of this is advertised as support. The next reboot confirms the IOAPIC state fix and reveals the
-nested argument words.
+of this is advertised as full support: the calls are accepted, but interrupts do not reach a guest
+yet.
 
 ---
 

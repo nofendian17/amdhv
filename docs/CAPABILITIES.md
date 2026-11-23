@@ -337,10 +337,14 @@ The first slice added a host-testable register model (`kext/Source/ApicState.hpp
 the call return `ok`, and `hvf-probe --apic` exercised all 32 APIC calls under such a VM.
 
 A trap-log capture decoded task trap 10's op codes (`0x6a`–`0x7a` for LAPIC/IOAPIC/AT-PIC and bus
-frequency) and task 11's `(data << 32) | addr` MSI argument. Thread trap 13 passes a tagged pointer
-that the generic logger cannot read, so a handler-side decoder is needed. The next slice wires the
-task-10/11 model and adds that decoder. Nothing is advertised as support yet: the calls still answer
-`HV_UNSUPPORTED`, and delivery into the guest is not implemented.
+frequency) and task 11's `(data << 32) | addr` MSI argument. Task traps 10/11 are now wired to the
+register model, and thread trap 13 accepts the ten per-vCPU sub-ops as no-ops after decoding their
+block codes. On the latest installed kext, 27 of the 32 APIC calls answer `ok`; the five
+`hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's userspace layer. IOAPIC get/put state
+used the wrong word of the arg block and is fixed in this tree, pending a reboot to confirm.
+
+Nothing is advertised as full support: the calls are accepted, but interrupt delivery into the
+guest is not implemented yet.
 
 ## A framework quirk worth knowing
 
