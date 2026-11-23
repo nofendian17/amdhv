@@ -613,7 +613,7 @@ static void probeApicFamily(void)
         uint32_t rt = 0;
         hv_return_t wr = hv_vcpu_apic_write(v, 0x80, 0x55, &noSideEffect);
         hv_return_t rd = hv_vcpu_apic_read(v, 0x80, &rt);
-        printf("  %-52s write=%d read=%d val=%#x\n", "  (apic TPR round-trip)", wr, rd, rt);
+        printf("  %-52s write=%d read=%d val=%#x (no-op API)\n", "  (apic TPR round-trip)", wr, rd, rt);
         APIC("hv_vcpu_exit_init_ap", hv_vcpu_exit_init_ap(v, active, 1));
         APIC("hv_vcpu_exit_startup_ap", hv_vcpu_exit_startup_ap(v, active, 1, &rip));
         APIC("hv_vcpu_exit_ioapic_eoi", hv_vcpu_exit_ioapic_eoi(v, &vec));

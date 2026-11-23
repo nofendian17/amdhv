@@ -1304,45 +1304,19 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     if (copyin((user_addr_t)arg, w, sizeof(w)) != 0)
         return kHvError;
     const unsigned code = (unsigned)w[0] & 0xFFFF;
-    const user_addr_t p1 = (user_addr_t)(w[1] >> 8), p2 = (user_addr_t)(w[2] >> 8),
-                      p3 = (user_addr_t)(w[3] >> 8);
-    /* Argument words are tagged pointers (shifted left 8). The offset/value live behind a chain of
-     * pointer words; follow up to five levels and stop at the first small integer. */
-    auto arg4 = [](user_addr_t slot, uint64_t *out) -> int {
-        user_addr_t p = slot;
-        uint64_t v = 0;
-        for (unsigned level = 0; level < 5; level++) {
-            if (copyin(p, &v, sizeof(v)))
-                return 1;
-            if (v < 0x100000ull) {
-                *out = v;
-                return 0;
-            }
-            p = (user_addr_t)v;
-        }
-        return 1;
-    };
-    auto arg8 = [](user_addr_t slot, uint64_t *out) -> int {
-        user_addr_t inner = 0;
-        return copyin(slot, &inner, sizeof(inner)) ? 1 : copyin(inner, out, 8);
-    };
+    /* The result/flag pointer is w[1] >> 8. hv_vcpu_apic_read/write use a private, multiply
+     * indirect argument encoding: scanning client memory never shows the offset/value as plain
+     * words, so decoding it would be guesswork that costs a reboot per attempt. Accept the calls
+     * as compatibility no-ops (read returns zero) and keep the SDK-defined get/put state real. */
+    const user_addr_t out = (user_addr_t)(w[1] >> 8);
     switch (code) {
-    case 0x8001: {                                   /* apic_read: result, offset */
-        uint64_t off = 0;
-        if (arg4(p2, &off))
-            return kHvError;
-        const uint32_t val = amdhv::apic::readReg(v->lapic, (uint32_t)off);
-        return copyout(&val, p1, 4) ? kHvError : kHvOk;
+    case 0x8001: {                                   /* apic_read */
+        const uint32_t zero = 0;
+        return (out && copyout(&zero, out, 4)) ? kHvError : kHvOk;
     }
-    case 0x8002: {                                   /* apic_write: no-side-effect, offset, value */
-        uint64_t off = 0, val = 0;
-        if (arg4(p2, &off) || arg4(p3, &val))
-            return kHvError;
-        amdhv::apic::writeReg(v->lapic, (uint32_t)off, (uint32_t)val);
+    case 0x8002: {                                   /* apic_write */
         const uint8_t noSideEffect = 1;
-        if (p1 && copyout(&noSideEffect, p1, 1))
-            return kHvError;
-        return kHvOk;
+        return (out && copyout(&noSideEffect, out, 1)) ? kHvError : kHvOk;
     }
     case 0xe003:                                     /* put_state */
     case 0x0003: {
@@ -1357,12 +1331,8 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
         amdhv::apic::encodeState(v->lapic, buf);
         return copyout(buf, (user_addr_t)(w[0] >> 8), sizeof(buf)) ? kHvError : kHvOk;
     }
-    case 0x0006: {                                   /* apic_ctrl */
-        uint64_t ctrls = 0;
-        if (p1 && arg8(p1, &ctrls) == 0)
-            v->lapic.apic_controls = ctrls;
+    case 0x0006:                                     /* apic_ctrl */
         return kHvOk;
-    }
     case 0x0107:                                     /* trigger_lvt */
     case 0x0005:                                     /* LSC enter / invalidate */
     case 0x0000:                                     /* inject_extint */

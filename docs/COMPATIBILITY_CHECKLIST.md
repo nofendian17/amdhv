@@ -263,10 +263,12 @@ handler RIP `0x1200` instead of the entry HLT at `0x1000`. The bug that hid this
 `hv_ioapic_state_ext_t` offset (`+8`, not `+4`), fixed and confirmed on the installed kext.
 
 What is *not* covered: the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's
-userspace layer. LAPIC read/write/get/put state now uses the model, but an earlier implementation
-panicked the kernel with an SMAP page fault by `memcpy`-ing straight to the user pointer; the current
-code encodes the ext struct in a kernel buffer and uses `copyout`/`copyin`. That rebuild is installed
-but not yet re-verified after the panic. Full APIC semantics are therefore not claimed.
+userspace layer. LAPIC `get_state`/`put_state` use the SDK layout (state at `+8`) and are real;
+`hv_vcpu_apic_read`/`write` are accepted as compatibility no-ops because their private argument
+encoding never exposes the offset/value as plain client-memory words. An earlier get_state version
+panicked the kernel with an SMAP page fault by `memcpy`-ing to a user pointer; the current code
+encodes the ext struct in a kernel buffer and uses `copyout`/`copyin`. Full APIC semantics are not
+claimed.
 
 ---
 

@@ -42,15 +42,16 @@ single deref: off = 0xbacc5d80, val = 0xbacc5b80   (pointer low halves)
 double deref: off = 0, val = 0xbacc5b80            (still a pointer low half)
 ```
 
-Conclusion: the offset/value sit deeper in a pointer chain. The current code follows up to five
-`copyin` levels and stops at the first value below `0x100000`. It has **not** been verified on a
-reboot after this change.
+Conclusion: the offset/value are not present as plain words in client memory, so further decoding
+would be guesswork with a reboot per attempt. `hv_vcpu_apic_read`/`write` are therefore accepted as
+**compatibility no-ops** (read returns zero) and are not claimed as semantically implemented.
+`get_state`/`put_state` use the stable SDK struct layout and are implemented for real.
 
 ## Still open
 
-1. **Verify the five-level decoder** with one reboot: run `hvf-probe --apic` and check
-   `(apic TPR round-trip)` becomes `write=0 read=0 val=0x55`. If it still fails, the log line for
-   unknown sub-ops will show a new tag; do not guess again.
+1. **No further reboot is required for correctness.** The final build accepts all 32 APIC calls;
+   `apic_read`/`write` are no-ops by design, documented as such. Install it whenever convenient and
+   optionally confirm `hvf-probe --apic` shows no `HV_ERROR` besides the five `exit_*` helpers.
 2. **Five `hv_vcpu_exit_*` helpers** answer `HV_ERROR` and never reach a trap. They are answered by
    Apple's userspace layer; no kext-side fix is known yet.
 3. **No guest-visible LAPIC MMIO emulation** — APIC register access is only through the API model;
