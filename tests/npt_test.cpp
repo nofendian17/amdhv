@@ -1,5 +1,5 @@
 /*
- * npt_test.cpp - host-side tests for kext/Source/Npt.hpp.
+ * npt_test.cpp - host-side tests for kext/Source/memory/Npt.hpp.
  *
  * The table memory comes from a fake allocator where "physical address" ==
  * virtual address, so the test can walk the raw tables the way the CPU would,
@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../kext/Source/Npt.hpp"
+#include "../kext/Source/memory/Npt.hpp"
 
 using namespace amdhv::npt;
 
@@ -480,6 +480,52 @@ void testMapRangeFailureAccounting()
     }
 }
 
+bool unalignedSegment(void *, uint64_t, uint64_t *pa, uint64_t *)
+{
+    *pa = 0x1001;
+    return true;
+}
+
+bool shortSegment(void *, uint64_t, uint64_t *pa, uint64_t *len)
+{
+    *pa = 0x1000;
+    *len = 0x800;                       /* less than a page: nothing can be mapped */
+    return true;
+}
+
+bool longSegment(void *, uint64_t, uint64_t *pa, uint64_t *len)
+{
+    *pa = 0x1000;
+    *len = 0x100000;                    /* longer than the range: must be clamped */
+    return true;
+}
+
+void testDefensivePaths()
+{
+    Fake f;
+    {
+        Table t;
+        CHECK(t.init(allocatorFor(&f)));        /* init(allocator) on a fresh table */
+        CHECK(t.init());                        /* re-init of a rooted table is a no-op */
+        CHECK(t.init(allocatorFor(&f)));        /* ... with an allocator too */
+        CHECK(t.tablePages() == 1);
+
+        uint64_t mapped = 123;
+        CHECK(t.mapRange(0x200000, 4096, PERM_R, OWN1, unalignedSegment, nullptr, &mapped) == BAD_SEGMENT);
+        CHECK(mapped == 0);
+        CHECK(t.mapRange(0x200000, 4096, PERM_R, OWN1, shortSegment, nullptr, &mapped) == BAD_SEGMENT);
+        CHECK(mapped == 0);
+        CHECK(t.mapRange(0x200000, 4096, PERM_R, OWN1, longSegment, nullptr, &mapped) == OK);
+        CHECK(mapped == 4096);                  /* the 1 MiB segment was clamped to the 4 KiB range */
+        CHECK(t.unmap(0x200000) == OWN1);
+        CHECK(t.mappedPages() == 0);
+    }
+    CHECK(f.pagesLive == 0 && f.memLive == 0);
+
+    Table empty;                                /* clear() before init() is harmless */
+    empty.clear(nullptr, nullptr);
+}
+
 } // namespace
 
 int main()
@@ -494,6 +540,7 @@ int main()
     testMapRange();
     testMapRangeRandom();
     testMapRangeFailureAccounting();
+    testDefensivePaths();
     if (fails) {
         printf("npt_test: %d FAILED\n", fails);
         return 1;

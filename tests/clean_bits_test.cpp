@@ -1,8 +1,8 @@
-/* clean_bits_test.cpp - host tests for kext/Source/CleanBits.hpp and the VMCB clean-bit bookkeeping. */
+/* clean_bits_test.cpp - host tests for kext/Source/svm/CleanBits.hpp and the VMCB clean-bit bookkeeping. */
 #include <stdio.h>
 #include <string.h>
 
-#include "../kext/Source/VmcsState.hpp"
+#include "../kext/Source/vmcs/VmcsState.hpp"
 
 using namespace amdhv::vmcb;
 using amdhv::vmx::VmcsState;

@@ -1,7 +1,7 @@
-/* space_pool_test.cpp - host tests for kext/Source/SpacePool.hpp. */
+/* space_pool_test.cpp - host tests for kext/Source/memory/SpacePool.hpp. */
 #include <stdio.h>
 
-#include "../kext/Source/SpacePool.hpp"
+#include "../kext/Source/memory/SpacePool.hpp"
 
 using namespace amdhv::space;
 

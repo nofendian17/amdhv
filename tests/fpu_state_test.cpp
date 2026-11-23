@@ -1,5 +1,5 @@
 /*
- * fpu_state_test.cpp - host tests for kext/Source/FpuState.hpp, including the real XSAVE/XRSTOR wrappers
+ * fpu_state_test.cpp - host tests for kext/Source/policy/FpuState.hpp, including the real XSAVE/XRSTOR wrappers
  * (they work in user mode; only XSETBV needs the kernel).
  */
 #include <cpuid.h>
@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../kext/Source/FpuState.hpp"
+#include "../kext/Source/policy/FpuState.hpp"
 
 using namespace amdhv::fpu;
 

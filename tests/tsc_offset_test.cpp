@@ -1,12 +1,12 @@
 /*
- * tsc_offset_test.cpp - host-side tests for kext/Source/TscOffset.hpp.
+ * tsc_offset_test.cpp - host-side tests for kext/Source/svm/TscOffset.hpp.
  *
  * The VMCB load itself needs guest mode, but the offset arithmetic does not.
  */
 #include <stdio.h>
 #include <stdint.h>
 
-#include "../kext/Source/TscOffset.hpp"
+#include "../kext/Source/svm/TscOffset.hpp"
 
 namespace {
 

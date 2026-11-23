@@ -1,7 +1,7 @@
-/* sleep_policy_test.cpp - host tests for kext/Source/SleepPolicy.hpp. */
+/* sleep_policy_test.cpp - host tests for kext/Source/policy/SleepPolicy.hpp. */
 #include <stdio.h>
 
-#include "../kext/Source/SleepPolicy.hpp"
+#include "../kext/Source/policy/SleepPolicy.hpp"
 
 using namespace amdhv::svm;
 

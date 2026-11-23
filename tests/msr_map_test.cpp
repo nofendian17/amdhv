@@ -1,8 +1,8 @@
-/* msr_map_test.cpp - host tests for kext/Source/MsrMap.hpp. */
+/* msr_map_test.cpp - host tests for kext/Source/svm/MsrMap.hpp. */
 #include <stdio.h>
 #include <string.h>
 
-#include "../kext/Source/MsrMap.hpp"
+#include "../kext/Source/svm/MsrMap.hpp"
 
 using namespace amdhv::msr;
 

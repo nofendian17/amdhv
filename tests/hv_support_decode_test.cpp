@@ -1,5 +1,5 @@
 /*
- * hv_support_decode_test.cpp - host-side tests for kext/Source/HvSupportDecode.hpp.
+ * hv_support_decode_test.cpp - host-side tests for kext/Source/svm/HvSupportDecode.hpp.
  *
  * The address itself is kernel-specific, but the RIP-relative arithmetic and the two
  * accepted encodings are not. A bad decode must return nullptr, never a guessed address.
@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../kext/Source/HvSupportDecode.hpp"
+#include "../kext/Source/svm/HvSupportDecode.hpp"
 
 namespace {
 
