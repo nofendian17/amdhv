@@ -123,6 +123,8 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vcpu_exit_info` / `vmx_status` | `HV_ERROR` | ro page 0x20/0x30 are 0, i.e. "no extra information", as on Apple |
 | `hv_vmx_read_capability` | yes | the VMX capability words VZ/QEMU build their controls from |
 | `hv_vmx_vcpu_read/write_vmcs` | yes | the VMCS shadow in `VmcsState.hpp` |
+| `hv_vcpu_set_tsc_relative` | yes | applied on the next run as `commpage(adjust - base) + relative` (`TscOffset.hpp`) |
+| `hv_vmx_vcpu_read/write_shadow_vmcs` / `set_shadow_access` | yes (client-side) | values round-trip in the framework's area; SVM has no shadow VMCS for the core |
 
 ## Full public API matrix, measured on 0.2.0
 
@@ -134,8 +136,9 @@ answer. Run it with:
 ./build/hvf-probe --matrix
 ```
 
-Measured on an AMD Ryzen 5 3600, macOS 15.8.3, kext 0.2.0, SDK macOS 15 (clock and TSC-offset
-numbers change per run):
+Measured on an AMD Ryzen 5 3600, macOS 15.8.3, SDK macOS 15, with the Phase 1 kext loaded
+(com.amdhv.AMDHV 0.2.0, UUID `D7CA29BF-7FA7-3C02-89EA-C22F24539562`). Clock and TSC-offset numbers
+change per run:
 
 ```
 Public x86 Hypervisor.framework API matrix (SDK macOS 15)
@@ -169,7 +172,7 @@ Public x86 Hypervisor.framework API matrix (SDK macOS 15)
   hv_vcpu_invalidate_tlb                               ok
   hv_vcpu_interrupt                                    ok
   hv_vcpu_set_tsc_relative                             ok
-    (set_tsc_relative effect)                          not the requested delta (offset 0xffffbd860d58f6c1 -> 0xffffbd860d58f6c1, delta 0)
+    (set_tsc_relative effect)                          wired (offset 0xffffff7b5757b459 -> 0x1000)
   hv_vcpu_run                                          ok
   hv_vcpu_run_until                                    ok
   hv_vcpu_get_exec_time                                ok
@@ -214,7 +217,7 @@ Public x86 Hypervisor.framework API matrix (SDK macOS 15)
   hv_vmx_vcpu_read_shadow_vmcs                         ok
   hv_vmx_vcpu_write_shadow_vmcs                        ok
     (shadow VMCS round-trip)                           wired (read-back 0x1234)
-  hv_vmx_vcpu_set_shadow_access                        HV_UNSUPPORTED
+  hv_vmx_vcpu_set_shadow_access                        ok
   hv_vmx_read_capability                               ok
   hv_vmx_get_msr_info                                  ok
     (msr_info value)                                   0
@@ -227,14 +230,13 @@ Public x86 Hypervisor.framework API matrix (SDK macOS 15)
 
 Three `ok` answers need a careful reading before they become a compatibility claim:
 
-- `hv_vcpu_set_tsc_relative` succeeded but the VMCS TSC offset did not move in 0.2.0: the framework
-  puts the relative value in `rw+0xc78` and sets flag `0x100`, and the front end only logged it.
-  This tree applies `commpage(adjust - base) + relative` to the VMCB offset on the next run
-  (`TscOffset.hpp`, host-tested); the live matrix changes after installing the kext and rebooting.
+- `hv_vcpu_set_tsc_relative` now works: the framework writes the relative value to `rw+0xc78` and
+  sets flag `0x100`, and the front end folds in the commpage delta before loading the VMCB offset.
+  The probe reads `0x1000` after the guest run, replacing the previous baseline from `hv_vm_sync_tsc`.
 - `hv_vmx_vcpu_read/write_shadow_vmcs` store and return the value in the framework's client-side
   area (the 0x1234 round-trip proves that), but SVM has no shadow VMCS for the core to consume.
-  `hv_vmx_vcpu_set_shadow_access` answered `HV_UNSUPPORTED` from thread trap 8 in 0.2.0; this tree
-  turns that trap into a no-op success to match the read/write helpers. Same reboot caveat.
+  `hv_vmx_vcpu_set_shadow_access` now answers `ok` as a no-op from thread trap 8, consistent with
+  them.
 - `hv_vmx_vcpu_set_apic_address_space` is a no-op success, like the already documented
   `hv_vmx_vcpu_set_apic_address`: the core keeps the TPR in `V_TPR` and never reads that page.
 

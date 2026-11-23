@@ -17,8 +17,8 @@ Each row is marked with evidence, not intent. Status meanings:
 | **n/a** | Not applicable to this design. |
 
 Baseline used for this revision (2026-11-23, AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3,
-AMDHV 0.2.0): `make test` passes all 15 tests, `hvf-probe` prints `64 of 64` vCPUs with
-`run_until(past deadline)` in `0.013 ms`, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
+AMDHV 0.2.0 + Phase 1): `make test` passes all 16 tests, `hvf-probe` prints `64 of 64` vCPUs with
+`run_until(past deadline)` in microseconds, `hvf-smoke` prints `PASS`, and `amd-info stats` keeps
 `enableFailures`, `vmInvalidExits`, `assertFailures` and `vmFpuMismatches` at 0. Re-run those four
 after every change; a checklist row without evidence is a hypothesis. `amd-info info` reports 32768
 ASIDs and features `0x0013bcff`, including `VmcbClean`, `FlushByAsid`, `PauseFilter` and
@@ -158,8 +158,8 @@ The macOS 15.8 x86 SDK declares 78 `hv_return_t` functions plus `hv_tsc_clock`. 
 read or write the shared pages, so many calls need no trap at all. The slots below split into
 **23 real handlers** (task 0–7 and 12–13, thread 0–12) and **9 stubs** (task 8–11 and
 14–15, thread 13–15). The tables record trap-level coverage; section 3.4 records the measured
-SDK surface. The thread-8 (`set_shadow_access`) handler and the TSC-relative path in this tree are
-new code: they need a kext install and reboot before the live matrix changes.
+SDK surface. Thread trap 8 (`set_shadow_access`) is a real no-op handler and the TSC-relative path
+applies on the next run; both were live-verified after installing the kext.
 
 ### 3.1 Task traps
 
@@ -192,7 +192,7 @@ new code: they need a kext install and reboot before the live matrix changes.
 | 5 | `hv_vcpu_destroy` | **Yes** | Frees the VMCB, host VMCB, bitmaps and FPU areas |
 | 6 | `hv_vcpu_set_space` | **Yes** | The trap argument is the raw space ID (verified); rebinds `nCR3` to that space's NPT root and flushes the vCPU's ASID |
 | 7 | `hv_vmx_vcpu_read_vmcs` (slot) | **Yes** | Reads from the VMCS shadow, fills the client's cache slot |
-| 8 | `hv_vmx_vcpu_set_shadow_access` | **Yes** | New no-op success; no shadow VMCS on SVM, but `read/write_shadow_vmcs` round-trip in the framework's client-side area |
+| 8 | `hv_vmx_vcpu_set_shadow_access` | **Yes** | No-op success, live-verified; no shadow VMCS on SVM, but `read/write_shadow_vmcs` round-trip in the framework's client-side area |
 | 9 | `hv_vmx_vcpu_set_apic_address` | **Yes** | No-op success; the TPR is kept in `V_TPR`, the page is never read |
 | 10 | `hv_vcpu_set_msr_access` | **Yes** | Toggles MSRPM read/write intercepts |
 | 11 | sync special registers | **Yes** | DR0–DR7 and other special registers synchronised on demand |
@@ -222,9 +222,9 @@ there is no longer an "unverified" bucket. The line-by-line output is in
 | Group | Functions | Measured answer | Reading |
 | --- | --- | --- | --- |
 | Capability / clock | `hv_capability`, `hv_tsc_clock` | `ok` (`VCPUMAX=64`), monotonic value | real, framework-side |
-| TSC offset | `hv_vcpu_set_tsc_relative` | `ok` but the VMCS TSC-offset read-back does not change (0.2.0) | code now applies `rw+0xc78` plus the commpage delta on the next run; needs a kext install + reboot to show in the matrix |
+| TSC offset | `hv_vcpu_set_tsc_relative` | `ok`, VMCB offset becomes `0x1000` after the run | live-verified after the Phase 1 kext install; framework writes `rw+0xc78` and flag `0x100` |
 | Shadow VMCS | `hv_vmx_vcpu_read/write_shadow_vmcs` | `ok`, value round-trips | client-side store only; SVM has no shadow VMCS for the core to consume |
-| Shadow access | `hv_vmx_vcpu_set_shadow_access` | `HV_UNSUPPORTED` (0.2.0, thread trap 8 stub) | now a real no-op success handler; needs a kext install + reboot to show in the matrix |
+| Shadow access | `hv_vmx_vcpu_set_shadow_access` | `ok` | no-op from thread trap 8, live-verified; consistent with the read/write helpers |
 | MSR info / cap-write / APIC address space | `hv_vmx_get_msr_info`, `hv_vmx_vcpu_get_cap_write_vmcs`, `hv_vmx_vcpu_set_apic_address_space` | `ok` (`0` for `IA32_ARCH_CAPABILITIES`), `ok` (thread trap 12), `ok` (no-op like `set_apic_address`) | answers correctly, no extra SVM state needed |
 | APIC state / exit helpers | `hv_vm_atpic_*`, `hv_vm_ioapic_get_state/put_state/pulse_irq`, `hv_vm_send_ioapic_intr`, `hv_vm_set_apic_bus_freq`, `hv_vcpu_apic_ctrl/get_state/put_state/trigger_lvt/lsc_*`, `hv_vcpu_exit_init_ap`, `hv_vcpu_exit_startup_ap`, `hv_vcpu_exit_ioapic_eoi`, `hv_vcpu_exit_apic_access_read`, `hv_vcpu_exit_inject_excp` | `HV_UNSUPPORTED` or `HV_ERROR` | same refused in-kernel-APIC family; no change |
 
@@ -233,10 +233,10 @@ deprecated API. `hv_vcpu_write_fpstate` returns `ok`: it writes the shared FP ar
 applies (`Frontend.cpp` reads flag `0x80` and calls `setFpu()` at lines 781–802). Neither name needs
 a kext trap of its own.
 
-The two rows marked "0.2.0" are the Phase 1 changes in this tree: `TscOffset.hpp` folds the
-framework's commpage delta into the VMCB TSC offset when flag `0x100` is set, and thread trap 8 is a
-real handler again. Both are host-tested and compile into `AMDHV.kext`; the live matrix still shows
-the old answers until that kext is installed and the machine is rebooted.
+The two Phase 1 changes are live-verified on the installed kext (UUID
+`D7CA29BF-7FA7-3C02-89EA-C22F24539562`): `hvf-probe --matrix` now shows the TSC offset at `0x1000`
+after a guest run and `set_shadow_access` answering `ok`. `make test` is 16/16, `hvf-smoke` passes,
+and `vmInvalidExits`, `assertFailures`, `enableFailures` and `vmFpuMismatches` stayed at zero.
 
 ---
 

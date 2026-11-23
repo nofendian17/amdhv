@@ -450,13 +450,16 @@ static void probeApiMatrix(void)
     hv_vmx_vcpu_read_vmcs(v, VMCS_CTRL_TSC_OFFSET, &off);
     uint64_t offBefore = off;
     mx("hv_vcpu_set_tsc_relative", hv_vcpu_set_tsc_relative(v, 0x1000));
-    hv_vmx_vcpu_read_vmcs(v, VMCS_CTRL_TSC_OFFSET, &off);
-    printf("  %-52s %s (offset %#" PRIx64 " -> %#" PRIx64 ", delta %#" PRIx64 ")\n",
-           "  (set_tsc_relative effect)", off - offBefore == 0x1000 ? "wired" : "not the requested delta",
-           offBefore, off, off - offBefore);
 
+    /* The provider applies the relative offset while entering the guest, so read it back after a run. */
     setupRealMode(v, 0x1000);
     mx("hv_vcpu_run", hv_vcpu_run(v));
+    hv_vmx_vcpu_read_vmcs(v, VMCS_CTRL_TSC_OFFSET, &off);
+    /* Our commpage starts with base = adjust = 0, so hv_tsc_clock() is rdtsc and the VMCB offset
+     * must be exactly the requested 0x1000. hv_vm_sync_tsc earlier in this matrix put a different
+     * baseline in the field, which is why a delta check would be wrong here. */
+    printf("  %-52s %s (offset %#" PRIx64 " -> %#" PRIx64 ")\n",
+           "  (set_tsc_relative effect)", off == 0x1000 ? "wired" : "not 0x1000", offBefore, off);
     setupRealMode(v, 0x1100);
     mx("hv_vcpu_run_until", hv_vcpu_run_until(v, mach_absolute_time()));
 
