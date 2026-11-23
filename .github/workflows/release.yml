@@ -21,7 +21,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    # x86_64 kext build; macos-15 without the suffix is arm64.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
         with:

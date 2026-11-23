@@ -10,7 +10,8 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    # The kext is x86_64; plain macos-15 is arm64 and its hosted queue stalls.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v5
 
