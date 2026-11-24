@@ -23,7 +23,7 @@ colima), VirtualBox, the Android emulator, or QEMU with `-accel hvf`. See
 ## Build
 
 ```bash
-make test          # 18 host tests, runs anywhere
+make test          # 20 host tests, runs anywhere
 make coverage      # same tests under gcov; data in build/cov/gcov
 make kext tools    # build/AMDHV.kext, build/amd-info, build/hvf-smoke, build/hvf-probe
 ```
@@ -166,7 +166,7 @@ kext/Source/   the kext, grouped by responsibility:
 include/       kext ⇄ tools ABI, log ring, VMCS field rules
 tools/         amd-info (the CLI above), hvf-smoke (public-API acceptance test),
                hvf-probe (which API calls this build answers, see docs/CAPABILITIES.md)
-tests/         the 18 host tests
+tests/         the 20 host tests
 scripts/       EFI install, symbol check, legacy QEMU boot test
 docs/          INSTALL_TO_EFI.md (manual install), CLIENTS.md (client index),
                CAPABILITIES.md (API matrix),

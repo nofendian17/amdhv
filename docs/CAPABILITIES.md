@@ -17,6 +17,11 @@ The enablement, SVM-core and framework checklist behind this matrix — includin
 not implemented and the gap register — is in
 [COMPATIBILITY_CHECKLIST.md](COMPATIBILITY_CHECKLIST.md).
 
+Version caveat: the probe records below were measured on the 2026-11-23 validation build (AMDHV
+0.2.0). The current tree is **v0.3.1** (`CHANGELOG.md`, tag `v0.3.1`; `kext/Makefile` stamps that
+tag into the built `Info.plist`, whose committed fallback is 0.3.0). The current tree's `make test`
+runs 20 host tests; the counts in the records below are from the 2026-11-23 build.
+
 ## What VZ actually calls
 
 A VZ VM on x86 is a userspace device model on top of a small hypervisor API. The live trap log of a
@@ -98,13 +103,13 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 
 | API | AMDHV | Notes |
 | --- | --- | --- |
-| `hv_vm_create` | yes | one VM per task; `HV_VM_ACCEL_APIC` is refused with `HV_UNSUPPORTED` |
+| `hv_vm_create` | yes | one VM per task; `HV_VM_ACCEL_APIC` needs boot-arg `amdhv_apic=1`, otherwise `HV_UNSUPPORTED` |
 | `hv_vm_destroy` | yes | refused while a vCPU or a trap still holds the VM; a live vCPU makes the client answer `HV_ERROR`, and the call succeeds after the last `hv_vcpu_destroy` |
 | `hv_vm_map` / `unmap` / `protect` | yes | map/protect require 4 KiB-aligned ranges, and one map is capped at 16 GiB (`AMDHV_MAP_MAX_SIZE`); unmap accepts sub-page ranges and rounds them to page boundaries |
 | `hv_vm_sync_tsc` | yes | handed to vCPUs created later too |
 | `hv_vm_space_create` / `map_space` / `protect_space` / `unmap_space` / `space_destroy` | yes | up to 64 extra address spaces, each with its own NPT root; `space_destroy` answers `HV_BUSY` while a vCPU is bound to it |
 | `hv_vm_add_pio_notifier` / `remove` | no | stubs; VZ uses I/O exits instead |
-| `hv_vm_atpic_*` / `hv_vm_ioapic_*` / `hv_vm_lapic_*` | no | in-kernel APIC only, which `hv_vm_create` refuses |
+| `hv_vm_atpic_*` / `hv_vm_ioapic_*` / `hv_vm_lapic_*` | opt-in | task trap 10 (`tIntCtl`) with `amdhv_apic=1`; see [In-kernel APIC work](#in-kernel-apic-work-phase-3-in-progress) |
 | `hv_vcpu_create` / `destroy` | yes | one vCPU per thread, up to 64 |
 | `hv_vcpu_read/write_register` | yes | through the shared page, no trap |
 | `hv_vcpu_read/write_msr` | yes | MSR cache plus native/managed lists |
@@ -116,8 +121,8 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vcpu_run` | yes | blocks until a VM exit; 10 ms host slice |
 | `hv_vcpu_run_until` | yes | finite deadline folded into the slice, reported as exit 52 |
 | `hv_vcpu_interrupt` | yes | IPI to the CPU in the guest |
-| `hv_vcpu_inject_extint` | no | thread trap 13 sub-op 0; only meaningful with the in-kernel APIC |
-| `hv_vcpu_apic_*` | no | thread trap 13 sub-ops 1/2/4/6/7; in-kernel APIC only |
+| `hv_vcpu_inject_extint` | partial | thread trap 13 sub-op 0 is decoded but still a no-op; requires `amdhv_apic=1` |
+| `hv_vcpu_apic_*` | partial | thread trap 13 sub-ops 1/2/4/6/7 are decoded; get/put state are real, read/write are no-ops; requires `amdhv_apic=1` |
 | `hv_vcpu_get_exec_time` | yes | ro page offset 0, updated after every run |
 | `hv_vcpu_get_idle_time` | yes (0) | ro page offset 8; HLT is a client exit, not emulated in the kernel |
 | `hv_vcpu_exit_info` / `vmx_status` | `HV_ERROR` | ro page 0x20/0x30 are 0, i.e. "no extra information", as on Apple |
@@ -243,7 +248,9 @@ Three `ok` answers need a careful reading before they become a compatibility cla
 `hv_capability` reports `VCPUMAX=64`, matching `AMDHV_MAX_VCPUS_PER_VM`; `hv_tsc_clock` returns a
 monotonic value; `hv_vmx_get_msr_info` answers 0 for the Intel-only `IA32_ARCH_CAPABILITIES` info
 field. The five `hv_vcpu_exit_*` helpers and `hv_vcpu_vmx_status`/`hv_vcpu_exit_info` answer
-`HV_ERROR` / `HV_UNSUPPORTED` because they only have meaning with the refused in-kernel APIC.
+`HV_ERROR` / `HV_UNSUPPORTED` because they only have meaning with the in-kernel APIC, which is
+opt-in (`amdhv_apic=1`). The five `hv_vcpu_exit_*` helpers need an `HV_VM_EXITINFO_*` code from
+`hv_vcpu_exit_info()`, which the core never publishes.
 
 ## Capability words follow the implementation
 
@@ -332,7 +339,7 @@ QEMU's TPM device setup additionally needs the sub-page `hv_vm_unmap` rounding f
 The 34 refused calls are not all blocked in the kext: with a default VM, Apple's framework answers
 most of them in userspace before any trap is reached. A follow-log capture of `hvf-probe --matrix`
 shows only `hv_vm_lapic_msi` reaching task trap 11; the gate is `hv_vm_create(HV_VM_ACCEL_APIC)`,
-which the provider refused.
+which is now open with boot-arg `amdhv_apic=1` (below).
 
 The first slice added a host-testable register model (`kext/Source/arch/ApicState.hpp`,
 `tests/apic_test.cpp`) whose LAPIC/IOAPIC/8259A layouts match the SDK state structs byte for byte.
@@ -342,8 +349,9 @@ the call return `ok`, and `hvf-probe --apic` exercised all 32 APIC calls under s
 A trap-log capture decoded task trap 10's op codes (`0x6a`–`0x7a` for LAPIC/IOAPIC/AT-PIC and bus
 frequency) and task 11's `(data << 32) | addr` MSI argument. Task traps 10/11 are now wired to the
 register model, and thread trap 13 accepts the ten per-vCPU sub-ops as no-ops after decoding their
-block codes. On the installed kext, `--apic` shows 31 `ok` answers; the five
-`hv_vcpu_exit_*` helpers still answer `HV_ERROR` from Apple's userspace layer. IOAPIC get/put state
+block codes. On the installed kext, `--apic` shows **27 `ok`** answers out of 32 calls; the five
+`hv_vcpu_exit_*` helpers still answer `HV_ERROR` because AMDHV never publishes the
+`HV_VM_EXITINFO_*` codes those helpers decode. IOAPIC get/put state
 used the wrong word of the arg block; the fix is live-verified (both calls answer `ok`).
 
 The guest path is now live-verified with `hvf-probe --apic-run`: a real-mode guest with an IVT entry
@@ -352,8 +360,8 @@ entry HLT at `0x1000`. The trap log shows `pending=48` for that run. The fix tha
 the `hv_ioapic_state_ext_t` layout: state starts at offset `+8`, not `+4`; the 4-byte shift made the
 mask bit appear set. `offsetof` on the macOS 15 SDK gives `ioapic=8`, `apic=8`, `atpic=4`.
 
-Only the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR`; they never reach a trap and appear
-to be answered by Apple's userspace layer. LAPIC `get_state`/`put_state` use the SDK layout (state at
+Only the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR`; they never reach a trap because the
+core publishes no `HV_VM_EXITINFO_*` code for them to decode. LAPIC `get_state`/`put_state` use the SDK layout (state at
 `+8`) and are real; `hv_vcpu_apic_read`/`write` are accepted as no-ops because their private
 argument encoding does not expose the offset/value as plain client-memory words. An earlier
 get_state version caused an SMAP panic by copying straight to a user pointer; the current code uses
