@@ -14,6 +14,8 @@
 #include "HvSupportDecode.hpp"
 #include "HvMsrs.hpp"
 #include "HvSlots.hpp"
+#include "HypervisorApi.hpp"
+#include "HvKextAbi.hpp"
 #include "AMDHV.hpp"
 #include "KernelDecls.hpp"
 #include "Vm.hpp"
@@ -33,16 +35,7 @@
 extern "C" {
 typedef kern_return_t (*hv_trap_t)(void *target, uint64_t arg);
 
-typedef struct {
-    void (*dispatch)(void *vcpu);
-    void (*preempt)(void *vcpu);
-    void (*suspend)(void);
-    void (*thread_destroy)(void *vcpu);
-    void (*task_destroy)(void *vm);
-    void (*volatile_state)(void *vcpu, int state);
-    void (*resume)(void);
-    void (*memory_pressure)(void);
-} hv_callbacks_t;
+/* hv_callbacks_t is declared in HvKextAbi.hpp; its layout is part of the xnu ABI. */
 
 extern int hv_get_support(void);                          /* returns hv_support_available: used to read the result back, and its code names the address */
 extern "C" int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);   /* reads kern.hv_support through its OID */
@@ -384,13 +377,13 @@ kern_return_t tVmCreate(void *target, uint64_t arg)
     struct { uint64_t flags, info; } a = {0, 0};
     if (copyin((user_addr_t)arg, &a, sizeof(a)))
         return kHvError;
-    if ((a.flags & 0x400) && !gApicAccel)
+    if ((a.flags & amdhv::hv::kVmAccelApic) && !gApicAccel)
         return kHvUnsupportedCode;              /* the in-kernel APIC variant is opt-in while its handlers are built */
     uint64_t info[kInfoBytes / 8];
     HvVm *vm = vmCreate(info);
     if (!vm)
         return kHvNoRes;
-    vm->apicAccel = (a.flags & 0x400) != 0;
+    vm->apicAccel = (a.flags & amdhv::hv::kVmAccelApic) != 0;
     if (vm->apicAccel)
         AMDHV_INFO("hv front end: VM created with the in-kernel APIC requested");
     if (copyout(info, (user_addr_t)a.info, kInfoBytes)) {
@@ -1588,14 +1581,16 @@ kern_return_t stub(void *target, uint64_t arg)
 
 #define S(T, I) stub<T, I>
 /* Task traps: 0 vm_create, 1 vm_destroy, 2/3 space_create/destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc,
- * 12 vcpu_create, 13 vcpu_interrupt are real; the rest is logged and answered per mode. */
+ * 10 tIntCtl (AT-PIC/IOAPIC), 11 tLapicMsi, 12 vcpu_create and 13 vcpu_interrupt are real;
+ * 8/9 (PIO notifier) and 14/15 are logged and answered per mode. */
 /* ---- the tables xnu calls into ---- */
 const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, tVmSpaceCreate, tVmSpaceDestroy, tVmMap, tVmUnmap, tVmProtect,
                                       tVmSyncTsc, S(0, 8), S(0, 9), tIntCtl, tLapicMsi, tVcpuCreate, tVcpuInterrupt, S(0, 14),
                                       S(0, 15)};
 /* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 5
  * vcpu_destroy, 6 set address space, 7 read slot, 8 set shadow access (no-op), 9 set APIC address (no-op),
- * 10 set_msr_access, 11 sync special regs, 12 capability of a writable slot are real. */
+ * 10 set_msr_access, 11 sync special regs, 12 capability of a writable slot and 13 APIC sub-ops are real;
+ * 14/15 are logged stubs. */
 const hv_trap_t kThreadTable[kTraps] = {tVcpuRun, tVcpuRunUntil, tInvalidateTlb, tEnableManaged, tDisableManaged, tVcpuDestroy,
                                         tSetSpace, tReadSlot, tSetShadowAccess, tSetApicAddress, tSetMsrAccess, tSyncSpecial, tCapWrite,
                                         tApicSubOp, S(1, 14), S(1, 15)};

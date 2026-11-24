@@ -9,10 +9,10 @@ action by itself** — each stage needs a human decision.
 
 | Gate | Evidence | Status |
 | --- | --- | --- |
-| Host tests | `make test`: 18/18 (`host_test` … `apic_mmio_test`) | Green |
+| Host tests | `make test`: 20/20 (`host_test` … `hv_kext_abi_test`) | Green |
 | Kext build | `make kext`, `check-kext-symbols`: 393/393 symbols resolve | Green |
 | Public API probe | `hvf-probe`: 79 of 79 functions observed; `--matrix`: 79 of 79 | Green |
-| APIC surface | `--apic`: 31 `ok`; five `hv_vcpu_exit_*` `HV_ERROR` (userspace-only, documented) | Known gap |
+| APIC surface | `--apic`: 27 `ok` / 32; five `hv_vcpu_exit_*` `HV_ERROR` (no `HV_VM_EXITINFO_*` published) | Known gap |
 | Guest delivery | `--apic-run`: IRQ0 → vector `0x30`, exit at `RIP 0x1200` | Green |
 | Smoke | `hvf-smoke`: `PASS` | Green |
 | Host sanity | `amd-info info`: SVM active 12/12, 32768 ASIDs; `selftest`: 12 of 12 CPUs ok | Green |
