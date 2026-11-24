@@ -15,7 +15,7 @@ and the 0.1.x kext. Treat them as examples, not a compatibility guarantee.
 | colima 0.10.3 | VZ | 4 vCPU/8 GiB VM starts; `docker run hello-world` succeeds | [COLIMA.md](COLIMA.md) |
 | VirtualBox 7.2.22 | HVF | Windows 10 (64-bit) boots to desktop | [VIRTUALBOX.md](VIRTUALBOX.md) |
 | Android Studio emulator 37.3.10 | HVF | Android 17 AVD boots; ADB, input and network work | [ANDROID_STUDIO.md](ANDROID_STUDIO.md) |
-| QEMU 11.1.3 (`-accel hvf`) | HVF | Linux boots; Windows 10/11 stop at the Tianocore logo | [QEMU.md](QEMU.md) |
+| QEMU 11.1.3 (`-accel hvf`) | HVF | Windows 10/11 reach Setup; Linux boots with `tsc=reliable` | [QEMU.md](QEMU.md) |
 
 For the low-level API surface, see [CAPABILITIES.md](CAPABILITIES.md), or run `./build/hvf-probe`
 on a live machine.

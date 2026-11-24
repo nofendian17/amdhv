@@ -307,14 +307,17 @@ the 0.1.x kext loaded:
 | Android 17 AVD (`Medium_Phone_API_37.0`) | Android Studio emulator 37.3.10 | boots to launcher; ADB online, input, UI and network work (re-checked on 0.1.2) |
 | LinuxKit / Docker Desktop | VZ | works; engine starts and containers serve traffic |
 | Lubuntu 24.04, 4 vCPU, QEMU `tsc=reliable` | QEMU 11.1.3 `-accel hvf` | boots to login prompt |
-| Windows 10 and 11 | QEMU 11.1.3 `-accel hvf` | OVMF, `BOOTX64.EFI` and `cdboot.efi` load and the Tianocore logo appears, but setup never starts |
+| Windows 10 and 11 | QEMU 11.1.3 `-accel hvf` | OVMF, `BOOTX64.EFI` and `cdboot.efi` load and Windows Setup starts; a missed CD boot-key press falls through to PXE, and Win11 needs the `LabConfig` requirements bypass |
 
 The VirtualBox and Android results are not guesses from a window being open: `com.amdhv.AMDHV`'s
 `vmExits` counter stops increasing while the VirtualBox VM is paused or the emulator process is
 suspended, and resumes when each is allowed to run. No other VBox kernel extension is loaded, and
 `vmInvalidExits` and `assertFailures` stayed at zero. So Windows and Android do run through
-HVF/AMDHV — the QEMU hang is specific to QEMU's HVF accelerator, not a missing capability in this
-kext. The QEMU attempts produced no host panic either.
+HVF/AMDHV. The QEMU symptom was an OVMF CD boot-key timeout (VM falls through to PXE), plus the
+Windows 11 installer's TPM/Secure Boot gate — not a missing capability in this kext. HVF here also
+rejects `-machine q35,smm=on` (`System Management Mode not supported by this hypervisor`), so the
+standard Secure Boot OVMF path is unavailable. See [QEMU.md](QEMU.md). The QEMU attempts produced no
+host panic either.
 
 ### Support status
 
