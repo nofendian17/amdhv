@@ -5,6 +5,24 @@ semantic versioning. The `v*` git tag is the release version: `kext/Makefile` st
 built `Info.plist`. The value committed in `kext/Info.plist` is only a fallback for source archives
 made with `git archive`, which have no tag metadata.
 
+## [0.3.2] — 2026-11-25
+
+### Added
+- `hv_api_constants_test` and `hv_kext_abi_test` guard the documented `HV_VM_ACCEL_APIC` bit and
+  the xnu callback layout. `make test` now runs 20 host tests.
+
+### Changed
+- The kext reads the APIC-acceleration flag from a documented constant and declares the xnu
+  callback struct from a shared header instead of repeating version-sensitive values inline. No
+  runtime behaviour changes; APIC remains opt-in via `amdhv_apic=1`.
+- `COMPATIBILITY_CHECKLIST.md` is now a table-driven developer reference listing all 79 x86
+  Hypervisor.framework APIs and the AMD/SVM features with status and explanation.
+
+### Fixed
+- Documentation now reports the measured APIC result (`27 ok` of 32) and the real cause of the five
+  `hv_vcpu_exit_*` `HV_ERROR` answers: AMDHV publishes no `HV_VM_EXITINFO_*` code for those helpers
+  to decode. Test and version counts match the current tree.
+
 ## [0.3.1] — 2026-11-23
 
 ### Changed
