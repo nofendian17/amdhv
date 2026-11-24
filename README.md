@@ -17,8 +17,8 @@ It is a simplified rewrite of the RyzenHV project: native mode only, no shim, no
 - OpenCore.
 
 A VM client that uses Hypervisor.framework: a VZ-based Docker runtime (Docker Desktop, Kiri or
-colima), VirtualBox, or the Android emulator. QEMU with `-accel hvf` is no longer a target — see
-[QEMU is not the supported path](#qemu-is-not-the-supported-path).
+colima), VirtualBox, the Android emulator, or QEMU with `-accel hvf`. See
+[Running Windows under QEMU](#running-windows-under-qemu).
 
 ## Build
 
@@ -60,7 +60,7 @@ Per-client guides: [docs/CLIENTS.md](docs/CLIENTS.md).
 | colima 0.10.3 (`--vm-type vz`) | [COLIMA.md](docs/COLIMA.md) | 4 vCPU/8 GiB VM starts; `docker run hello-world` succeeds |
 | VirtualBox 7.2.22 | [VIRTUALBOX.md](docs/VIRTUALBOX.md) | Windows 10 (64-bit, 4 vCPU, 8 GiB) boots to desktop |
 | Android Studio emulator 37.3.10 | [ANDROID_STUDIO.md](docs/ANDROID_STUDIO.md) | Android 17 AVD boots; ADB, input and network work |
-| QEMU 11.1.3 (`-accel hvf`) | [QEMU.md](docs/QEMU.md) | Linux boots; Windows 10/11 stop at the Tianocore logo |
+| QEMU 11.1.3 (`-accel hvf`) | [QEMU.md](docs/QEMU.md) | Windows 10 and 11 reach Setup; Linux boots with `tsc=reliable` |
 
 These are single-host observations, not a support promise: colima, VirtualBox, Docker Desktop,
 Android Studio and QEMU are **not officially supported clients** of this project. Each guide covers
@@ -68,13 +68,15 @@ install, verification through AMDHV and troubleshooting. What each Hypervisor.fr
 on a given build is in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and `./build/hvf-probe` prints
 it live. Start the client after boot, when `kern.hv_support` is 1.
 
-### QEMU is not the supported path
+### Running Windows under QEMU
 
-QEMU with `-accel hvf` runs Linux guests here (Lubuntu 24.04 needs `tsc=reliable`), but Windows
-10 and 11 stop at the Tianocore logo after `cdboot.efi` loads — setup never starts. Windows works
-under VirtualBox and Android works under the Android emulator through the same HVF/AMDHV stack, so
-this is QEMU-specific. See [docs/QEMU.md](docs/QEMU.md) for details; `scripts/qemu-test.sh` is kept
-for reference only and no signing step is needed with MacPorts QEMU.
+QEMU with `-accel hvf` boots Windows 10 and 11 to Windows Setup through the same HVF/AMDHV stack.
+The common failure is OVMF's "Press any key to boot from CD or DVD" prompt timing out — the VM then
+falls through to the empty disk and PXE. Press a key promptly, and after installation boot from the
+disk rather than the ISO. Windows 11 additionally fails the installer's TPM/Secure Boot check:
+`-machine q35,smm=on` is rejected by HVF (`System Management Mode not supported by this hypervisor`),
+so use the `LabConfig` bypass described in [docs/QEMU.md](docs/QEMU.md). `scripts/qemu-test.sh` is
+kept for reference only; no signing step is needed with MacPorts QEMU.
 
 ### Parallels Desktop is not supported
 
@@ -142,8 +144,9 @@ processes can each run a VM, but several at once are less tested than a single o
 - Sleep/wake with a running VM is untested — shut VMs down first.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.
-- Windows under QEMU is blocked at the Tianocore logo; Windows under VirtualBox works. Neither
-  client is officially supported by this project.
+- Windows under QEMU boots to Setup but needs a prompt boot-key press; Windows 11 also needs the
+  `LabConfig` requirements bypass because HVF does not support SMM. Neither QEMU nor VirtualBox is
+  officially supported by this project.
 - Verified on this rewrite: **Zen 2** (Matisse, Ryzen 5 3600) with macOS Sequoia — `hvf-smoke`,
   `amd-info`, VZ/Docker (Kiri, Docker Desktop), VirtualBox and the Android emulator all work. The
   ported core was additionally tested on a Ryzen 7 5800H by the original RyzenHV project. Re-test

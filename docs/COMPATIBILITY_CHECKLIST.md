@@ -282,7 +282,7 @@ claimed.
 | VirtualBox 7.2.22 | VMX controls, NPT, event injection, TPR shadow | **Yes** | Windows 10 boots to desktop; Lubuntu live reaches installer |
 | Android emulator 37.3.10 | VMX controls, NPT, FPU/XSAVE | **Yes** | Android 17 AVD boots; ADB, input and network work |
 | QEMU 11.1.3 `-accel hvf` (Linux) | VMX controls, NPT | **Yes** | Lubuntu boots with `tsc=reliable` |
-| QEMU 11.1.3 `-accel hvf` (Windows) | additional HVF/QEMU behaviour | **Partial** | stops at the Tianocore logo; not attributed to AMDHV |
+| QEMU 11.1.3 `-accel hvf` (Windows) | OVMF boot timing, Win11 installer gates | **Verified** | Windows 10/11 reach Setup; press the CD boot key promptly; Win11 needs `LabConfig` bypass (SMM unsupported by HVF) |
 
 These are single-host observations, not a support promise. See `docs/CLIENTS.md`.
 
@@ -504,9 +504,11 @@ the expected refusal of the 65th vCPU. No other warning was written.
    never DMA-mapped. The warning should be absent on the next boot:
    `log show --last boot --predicate 'eventMessage CONTAINS "waitForSystemMapper"'` should return no
    kernel line.
-3. **QEMU Windows hang.** OVMF and `cdboot.efi` load, then setup never starts. Windows works under
-   VirtualBox and Android works under the emulator through the same stack, so this is QEMU-specific
-   until proven otherwise.
+3. **QEMU Windows boot key (root-caused).** OVMF and `cdboot.efi` load and Setup does start. The
+   apparent hang was the "Press any key to boot from CD or DVD" timeout: without a key press OVMF
+   falls through to the empty disk and PXE. Windows 11 additionally fails the installer's
+   TPM/Secure Boot check; `-machine q35,smm=on` is refused by HVF, so use the `LabConfig` bypass.
+   See [QEMU.md](QEMU.md).
 4. **Host clock.** This host reports `AppleRTC: lost battery power - time may be invalid` and has
    produced a watchdog panic with a bogus elapsed time. Treat clock-dependent panics as environment
    issues until the RTC is fixed; do not attribute them to SVM without a trace.
