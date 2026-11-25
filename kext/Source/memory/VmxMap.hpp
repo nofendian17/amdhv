@@ -226,7 +226,7 @@ static inline uint32_t arFromAttrib(uint16_t attrib)
 
 /* VMX basic exit reasons (Intel SDM Vol. 3, Appendix C). */
 enum ExitReason : uint32_t {
-    VMX_EXC_NMI = 0, VMX_EXT_INTR = 1, VMX_TRIPLE_FAULT = 2, VMX_INIT = 3, VMX_IRQ_WINDOW = 7,
+    VMX_EXC_NMI = 0, VMX_EXT_INTR = 1, VMX_TRIPLE_FAULT = 2, VMX_INIT = 3, VMX_OTHER_SMI = 6, VMX_IRQ_WINDOW = 7,
     VMX_NMI_WINDOW = 8, VMX_TASK_SWITCH = 9, VMX_CPUID = 10, VMX_HLT = 12, VMX_INVD = 13, VMX_INVLPG = 14,
     VMX_RDPMC = 15, VMX_RDTSC = 16, VMX_VMCALL = 18, VMX_CR_ACCESS = 28, VMX_DR_ACCESS = 29, VMX_IO = 30,
     VMX_RDMSR = 31, VMX_WRMSR = 32, VMX_INVALID_GUEST_STATE = 33, VMX_MWAIT = 36, VMX_MONITOR = 39,
@@ -384,6 +384,13 @@ static inline bool translateExit(const SvmExit &in, VmxExit *out)
         out->instrLen = 0;
         return true;
     }
+
+    case EXIT_SMI:
+        /* Intel has no guest SMI delivery here either: report the same "other SMI" reason Apple's
+         * VMCS uses so the client sees a named exit instead of UNHANDLED. SMM state is not emulated,
+         * so RIP stays where it was and the client decides whether to re-enter. */
+        out->reason = VMX_OTHER_SMI;
+        return true;
 
     case EXIT_INVALID:
         out->reason = VMX_ENTRY_FAILURE | VMX_INVALID_GUEST_STATE;

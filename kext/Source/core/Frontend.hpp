@@ -19,7 +19,7 @@ namespace hv {
 /* Registers when boot-arg amdhv_hv is given; harmless otherwise. */
 void start(com_amdhv_AMDHV *service);
 /* Undoes everything (kext stop). */
-void stop();
+bool stop();   /* false when live VMs prevented the teardown */
 
 /* Run-time control, used by the user client (amd-info hv ...). Mode 0 unregisters, 1 and 2 register (or just change the mode). */
 bool setMode(uint32_t mode);

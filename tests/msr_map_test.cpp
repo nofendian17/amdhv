@@ -45,8 +45,11 @@ int main()
     CHECK(mustIntercept(MSR_TSC));
     CHECK(mustIntercept(MSR_EFER));
     CHECK(mustIntercept(0x48) && mustIntercept(0x49));
-    CHECK(!mustIntercept(MSR_LSTAR) && !mustIntercept(MSR_FS_BASE) && !mustIntercept(MSR_TSC_AUX) &&
-          !mustIntercept(0x1B) && !mustIntercept(0x80));
+    CHECK(!mustIntercept(MSR_LSTAR) && !mustIntercept(MSR_FS_BASE) && !mustIntercept(MSR_TSC_AUX));
+    /* Every MSR the AMD core does not model stays intercepted, even when the framework's Intel-
+     * shaped cache offers it (0xDA0 = IA32_XSS, 0xDC0.. = Intel PT, 0x6xx = Intel LBR). */
+    CHECK(mustIntercept(0xDA0) && mustIntercept(0xDC0) && mustIntercept(0x680) &&
+          mustIntercept(0x1B) && mustIntercept(0x80));
     /* The guard is load-bearing: setNative() alone would clear the TSC intercept. */
     {
         uint8_t tscMap[kMsrpmSize];

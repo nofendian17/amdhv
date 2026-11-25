@@ -136,6 +136,9 @@ IOReturn com_amdhv_AMDHVUserClient::sHvControl(OSObject *target, void *,
                                                        IOExternalMethodArguments *args)
 {
     AMDHV_ME();
+    /* IOKit scalars are 64-bit; truncating hides high bits from the selector checks below. */
+    if (args->scalarInput[0] > UINT32_MAX || args->scalarInput[1] > UINT32_MAX)
+        return kIOReturnBadArgument;
     uint32_t cmd = (uint32_t)args->scalarInput[0], value = (uint32_t)args->scalarInput[1];
     if (cmd == kAMDHVHvSvmRescan) {
         AMDHV_ADMIN();

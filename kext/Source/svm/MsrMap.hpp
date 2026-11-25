@@ -103,7 +103,13 @@ static inline bool intelOnlySpecMsr(uint32_t msr)
 static inline bool mustIntercept(uint32_t msr)
 {
     Info i = info(msr);
-    return i.kind == K_EFER || i.kind == K_TSC || intelOnlySpecMsr(msr);
+    /*
+     * EFER and TSC are host-safety intercepts. Any MSR the AMD core does not model must stay
+     * intercepted too: the framework's cache mirrors Intel numbering, so enabling one of those
+     * numbers native clears the MSRPM bits and a Zen guest takes #GP on RDMSR/WRMSR. Answering
+     * success while keeping the intercept (Vm.cpp) leaves the emulation to the client.
+     */
+    return i.kind == K_EFER || i.kind == K_TSC || i.kind == K_UNKNOWN || intelOnlySpecMsr(msr);
 }
 
 /* Is `msr` an address a guest could even write to the 8 KiB map? */

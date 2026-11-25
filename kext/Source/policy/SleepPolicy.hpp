@@ -33,12 +33,10 @@ static inline bool needsReload(uint64_t vcpuEpoch, uint64_t sleepEpoch)
 
 /** First step of a suspend: refuse new guest entries, then tear the CPUs down. Idempotent, because the
  * power-management notification and the kernel's hv_suspend() callback both report the same event. */
-static inline void beginSuspend(bool &suspended, uint64_t &epoch)
+static inline void beginSuspend(volatile bool &suspended, uint64_t &epoch)
 {
-    if (!suspended) {
-        suspended = true;
+    if (!__atomic_exchange_n(&suspended, true, __ATOMIC_ACQ_REL))
         __atomic_add_fetch(&epoch, 1, __ATOMIC_RELEASE);
-    }
 }
 
 /** The system is coming back but the CPUs are not re-enabled yet: only the epoch moves. */
@@ -48,12 +46,10 @@ static inline void noteWake(uint64_t &epoch)
 }
 
 /** Last step of a resume, after every usable CPU has SVM on again (or the attempt has finished). */
-static inline void endResume(bool &suspended, uint64_t &epoch)
+static inline void endResume(volatile bool &suspended, uint64_t &epoch)
 {
-    if (suspended) {
-        suspended = false;
+    if (__atomic_exchange_n(&suspended, false, __ATOMIC_ACQ_REL))
         __atomic_add_fetch(&epoch, 1, __ATOMIC_RELEASE);
-    }
 }
 
 } // namespace svm

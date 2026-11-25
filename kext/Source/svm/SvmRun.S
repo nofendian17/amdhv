@@ -57,6 +57,11 @@ SYM(amdhv_svm_vmrun):
     pushq   %rdx                /*  0(%rsp) = host VMCB pa   */
 
     clgi
+    /* Set the host IF here, not next to VMRUN: an STI immediately before VMRUN leaves
+     * INTERRUPT_SHADOW set in the guest VMCB when #VMEXIT happens during VMRUN (AMD erratum;
+     * KVM's "KVM: SVM: Set RFLAGS.IF=1 in C code" workaround). The shadow is consumed by the
+     * instructions below, and GIF=0 keeps physical interrupts out until the guest runs. */
+    sti
 
     movq    0(%rsp), %rax
     vmsave  %rax                /* host FS/GS/TR/LDTR/KernelGSBase/SYSCALL MSRs -> host VMCB */
@@ -84,10 +89,11 @@ SYM(amdhv_svm_vmrun):
      * V_INTR_MASKING makes the HOST's EFLAGS.IF decide whether a physical interrupt takes the CPU out of the
      * guest. The caller runs with IF=0, so without this a guest would run with host interrupts blocked on this
      * core: no timer, no TLB-shootdown IPIs, no 10 ms time slice, a guest loop would hang the machine.
-     * GIF is 0 (CLGI above) so nothing is delivered before VMRUN, and the one-instruction interrupt shadow of
-     * STI covers VMRUN itself. The exit puts us back at GIF=0, and the CLI below restores the caller's IF=0.
+     * GIF is 0 (CLGI above) so nothing is delivered before VMRUN. The STI shadow was consumed by the
+     * instructions above, not carried into the guest; leaving STI here would set the guest's
+     * INTERRUPT_SHADOW on an early #VMEXIT. The exit puts us back at GIF=0, and the CLI below
+     * restores the caller's IF=0.
      */
-    sti
     vmrun   %rax
     cli
 

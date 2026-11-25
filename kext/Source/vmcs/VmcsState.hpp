@@ -122,11 +122,17 @@ static inline uint32_t eventInjFromVmx(uint32_t info, bool *isSoftware)
     uint32_t vector = info & 0xFF;
     uint32_t type   = (info >> 8) & 7;
     uint32_t svm;
+    /* AMD APM 15.20 Table 15-11 allows only SVM types 0/2/3/4. Intel VMX type 5 is a software
+     * exception (#BP/#OF): SVM type 3 with vectors 3/4 gives INT3/INTO trap semantics and the DPL
+     * check. Type 6 (ICEBP) has no SVM equivalent; keep the INTn skip so the instruction is not
+     * re-executed. */
     switch (type) {
     case 0: svm = 0; break;
     case 2: svm = 2; break;
     case 3: svm = 3; break;
-    case 4: case 5: case 6: svm = 4; *isSoftware = true; break;
+    case 4: svm = 4; *isSoftware = true; break;
+    case 5: svm = 3; *isSoftware = true; break;
+    case 6: svm = 4; *isSoftware = true; break;
     default: return 0;
     }
     return (1u << 31) | ((info & (1u << 11)) ? (1u << 11) : 0) | (svm << 8) | vector;

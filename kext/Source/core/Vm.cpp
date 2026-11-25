@@ -137,6 +137,13 @@ com_amdhv_AMDHVVm *com_amdhv_AMDHVVm::create(const AMDHVInfo &info, task_t owner
         *err = kIOReturnUnsupported;
         return nullptr;
     }
+    /* APM 15.25.8: with host EFER.NXE clear, every NPT mapping is executable regardless of its NX
+     * bit. Refuse the VM rather than silently ignoring the client's execute permissions. */
+    if (!(amdhv_rdmsr(AMDHV_MSR_EFER) & AMDHV_EFER_NXE)) {
+        AMDHV_ERR("VmCreate: host EFER.NXE is clear, NPT cannot enforce execute permission");
+        *err = kIOReturnUnsupported;
+        return nullptr;
+    }
 
     com_amdhv_AMDHVVmShared *sh = shared;
     if (sh)
@@ -333,9 +340,16 @@ IOReturn com_amdhv_AMDHVVm::protect(uint64_t gpa, uint64_t size, uint32_t flags)
 IOReturn com_amdhv_AMDHVVm::setSpace(uint32_t space)
 {
     IOLockLock(fLock);
+    /*
+     * Hold fRw for the whole lookup+bind. spaceDestroy() takes fRw write and checks
+     * spaceInUse(); without this, it could free the NPT root between spaceRoot() and the
+     * fSpace/nestedCr3 update, leaving this vCPU running with a dangling N_CR3.
+     * Lock order fLock -> fRw matches run()/spacePerm().
+     */
+    IORWLockRead(fShared->rw());
     uint64_t root = 0;
     IOReturn rc = kIOReturnSuccess;
-    if (!fShared->spaceRoot(space, &root)) {
+    if (!fShared->spaceRootLocked(space, &root)) {
         rc = kIOReturnBadArgument;
     } else if (space != fSpace) {
         fSpace = space;
@@ -343,6 +357,7 @@ IOReturn com_amdhv_AMDHVVm::setSpace(uint32_t space)
         fVmcs.markDirty(CLEAN_NP);      /* N_CR3 lives in the nested-paging clean group */
         fForceTlbFlush = 1;             /* translations of the old space must not survive */
     }
+    IORWLockUnlock(fShared->rw());
     IOLockUnlock(fLock);
     return rc;
 }
