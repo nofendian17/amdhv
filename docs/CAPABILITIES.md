@@ -18,7 +18,7 @@ not implemented and the gap register — is in
 [COMPATIBILITY_CHECKLIST.md](COMPATIBILITY_CHECKLIST.md).
 
 Version caveat: the probe records below were measured on the 2026-11-23 validation build (AMDHV
-0.2.0). The current tree is **v0.3.1** (`CHANGELOG.md`, tag `v0.3.1`; `kext/Makefile` stamps that
+0.2.0). The current tree is **v0.3.3** (`CHANGELOG.md`, tag `v0.3.3`; `kext/Makefile` stamps that
 tag into the built `Info.plist`, whose committed fallback is 0.3.0). The current tree's `make test`
 runs 20 host tests; the counts in the records below are from the 2026-11-23 build.
 

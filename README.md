@@ -140,7 +140,7 @@ processes can each run a VM, but several at once are less tested than a single o
 - Up to 64 extra address spaces per VM (`hv_vm_space_create`); the 65th returns `HV_NO_RESOURCES`.
 - A single `hv_vm_map` range is capped at 16 GiB, and nested page tables use 4 KiB leaves only (no
   2 MiB or 1 GiB leaves).
-- Hosts with more than 64 logical CPUs enable SVM on the first 64 only (`AMDHV_MAX_CPUS`).
+- Hosts with more than 64 logical CPUs enable SVM on the first 64 only (`AMDHV_MAX_CPUS`). The kick IPI uses a 64-bit CPU mask, so raising this limit without changing that mechanism would silently drop `hv_vcpu_interrupt` on CPU 64+. A VM is capped at 64 vCPUs by Apple's API (`AMDHV_MAX_VCPUS_PER_VM`).
 - Sleep/wake with a running VM is untested — shut VMs down first.
 - No entitlement check in native mode: any local process can create a VM. Not for machines with
   untrusted local users.

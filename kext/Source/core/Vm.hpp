@@ -68,6 +68,7 @@ public:
     IOReturn spaceDestroy(uint32_t id);
     /* Root of `space` (0 is the default table), for hv_vcpu_set_space. False when it does not exist. */
     bool     spaceRoot(uint32_t space, uint64_t *pa);
+    bool     spaceRootLocked(uint32_t space, uint64_t *pa);   /* caller holds fRw */
     /* NPT rights of `gpa` in `space` (npt::PERM_*), 0 when unmapped or the space does not exist. */
     uint32_t spacePerm(uint32_t space, uint64_t gpa);
     /* True when a vCPU is currently bound to `space`. */

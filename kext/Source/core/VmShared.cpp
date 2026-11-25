@@ -423,14 +423,20 @@ IOReturn com_amdhv_AMDHVVmShared::spaceDestroy(uint32_t id)
     return rc;
 }
 
-bool com_amdhv_AMDHVVmShared::spaceRoot(uint32_t space, uint64_t *pa)
+bool com_amdhv_AMDHVVmShared::spaceRootLocked(uint32_t space, uint64_t *pa)
 {
-    IORWLockRead(fRw);
     amdhv::npt::Table *table = tableFor(space);
     if (table && pa)
         *pa = table->rootPa();
-    IORWLockUnlock(fRw);
     return table != nullptr;
+}
+
+bool com_amdhv_AMDHVVmShared::spaceRoot(uint32_t space, uint64_t *pa)
+{
+    IORWLockRead(fRw);
+    const bool found = spaceRootLocked(space, pa);
+    IORWLockUnlock(fRw);
+    return found;
 }
 
 uint32_t com_amdhv_AMDHVVmShared::spacePerm(uint32_t space, uint64_t gpa)

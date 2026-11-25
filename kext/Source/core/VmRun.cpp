@@ -223,9 +223,20 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         if (svmFix < 0) {
             fRunCpu = -1;
             ml_set_interrupts_enabled(ints);
-            AMDHV_ERR("VmRun: SVM cannot be used on cpu %d (not usable or no save area), not entering the guest", runCpu);
+            AMDHV_ERR("VmRun: SVM cannot be used on cpu %d (ensure returned %d), not entering the guest", runCpu, svmFix);
             rc = kIOReturnNotReady;
             break;
+        }
+
+        /* A full suspend+resume can complete while this thread is frozen, so the epoch checked at
+         * run() entry is stale here. Re-read it with interrupts off: clean bits and TLB entries
+         * cached before the power removal must not be trusted by the VMRUN below. */
+        const uint64_t epochNow = svm::sleepEpoch();
+        if (epochNow != fSleepEpoch) {
+            fSleepEpoch = epochNow;
+            fVmcs.markAllDirty();
+            __atomic_store_n(&fForceTlbFlush, 1, __ATOMIC_RELEASE);
+            fLastCpu = -1;
         }
 
         /*
@@ -357,7 +368,11 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
          * (0xFEC00000) pages from the models when the page is not mapped. Only act when the decoded
          * address equals the faulting GPA; anything else still goes to the userspace VMM.
          */
-        if (fApicAccel && fApicLapic && code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1)) {
+        /* guestBytes() looks up its argument in the NPT, i.e. it needs a guest PHYSICAL address.
+         * VMCB save.rip is guest LINEAR; with guest paging on they differ, so let the userspace
+         * VMM decode the faulting instruction instead of serving bytes from an unrelated page. */
+        const bool guestPaging = (v->save.cr0 & AMDHV_CR0_PG) != 0;
+        if (!guestPaging && fApicAccel && fApicLapic && code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1)) {
             const uint64_t fault = v->control.exitInfo2;
             const uint32_t offL = amdhv::apic::mmioOffset(fault, 0xFEE00000ull);
             const uint32_t offI = fApicIoApic ? amdhv::apic::mmioOffset(fault, 0xFEC00000ull) : 0xFFFFFFFFu;

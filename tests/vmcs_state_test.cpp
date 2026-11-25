@@ -222,7 +222,8 @@ void testEventInjection()
     uint32_t gp = (1u << 31) | (1u << 11) | (3u << 8) | 13;                                /* #GP with error code */
     CHECK(eventInjFromVmx(gp, &soft) == gp && !soft);
     CHECK(eventInjFromVmx((1u << 31) | (4u << 8) | 0x80, &soft) == ((1u << 31) | (4u << 8) | 0x80) && soft);   /* INT 0x80 */
-    CHECK(eventInjFromVmx((1u << 31) | (6u << 8) | 3, &soft) == ((1u << 31) | (4u << 8) | 3) && soft);         /* INT3 */
+    CHECK(eventInjFromVmx((1u << 31) | (5u << 8) | 3, &soft) == ((1u << 31) | (3u << 8) | 3) && soft);         /* #BP: INT3 trap, SVM type 3 */
+    CHECK(eventInjFromVmx((1u << 31) | (6u << 8) | 1, &soft) == ((1u << 31) | (4u << 8) | 1) && soft);         /* ICEBP: no SVM type, INTn skip */
     CHECK(eventInjFromVmx((1u << 31) | (7u << 8) | 1, &soft) == 0);                        /* "other" type: not injectable */
 
     Fixture f;

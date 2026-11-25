@@ -109,12 +109,19 @@ bool com_amdhv_AMDHV::start(IOService *provider)
 void com_amdhv_AMDHV::stop(IOService *provider)
 {
     AMDHV_INFO("stopping");
-    amdhv::hv::stop();
+    /* Stop the callbacks first: a sleep event landing mid-teardown must not reach a half-torn-down
+     * service. This also keeps the notifier out of the live-VM path below. */
     if (fPMNotifier) {
         fPMNotifier->remove();
         fPMNotifier = nullptr;
     }
-    amdhv::svm::disableAll();
+    if (!amdhv::hv::stop()) {
+        /* Live VMs still hold the provider. Clearing SVME and freeing the host save areas now
+         * would let a vCPU's #VMEXIT write into freed memory. Leave SVM on for such a teardown. */
+        AMDHV_INFO("stop: live VMs, not disabling SVM (host save areas stay mapped)");
+    } else {
+        amdhv::svm::disableAll();
+    }
     super::stop(provider);
 }
 

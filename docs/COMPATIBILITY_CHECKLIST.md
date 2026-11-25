@@ -32,14 +32,21 @@ actually implemented, where an API is answered, and what is deliberately not sup
 | Item | Value |
 | --- | --- |
 | Validation host | AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3 (24H241) |
-| Validation build | AMDHV 0.2.0, 2026-11-23 run |
-| Current tree | **v0.3.1** (`CHANGELOG.md`, tag `v0.3.1`; `Info.plist` fallback 0.3.0, stamped from tag at build time) |
+| Validation build | AMDHV 0.2.0, 2026-11-23 run; current runtime checks 2026-11-25 ran against the **loaded 0.3.1 kext** |
+| Current tree | **v0.3.3** (`CHANGELOG.md`, tag `v0.3.3`; `Info.plist` fallback 0.3.0, stamped from tag at build time) |
 | Host tests | `make test` → **20/20** (`hv_api_constants_test`, `hv_kext_abi_test` added by the API/ABI hardening) |
-| Kext build | `make kext` → 393 imported symbols resolve; no ABI change |
+| Kext build | `make kext tools` → 393 imported symbols resolve; no ABI change |
 | Historical figures | `18 tests` / `18/18` in the records below belong to the 0.2.0 validation build |
 
 `79 of 79` in `hvf-probe --matrix` means **all 79 calls were probed and answered**, not that all 79
 are fully implemented. The tables below make that distinction.
+
+That surface is specifically the **macOS 15.x x86 SDK** — 78 `hv_return_t` declarations in
+`Hypervisor.framework/Headers/hv*.h` plus `hv_tsc_clock`. Apple's current online documentation also
+lists APIs absent from that SDK (SME/SVE register access, `hv_vm_config_*_ipa_size`,
+`hv_vm_allocate`/`hv_vm_deallocate`, `hv_vcpu_get_wait_for_interrupt_time` and the three-argument
+`hv_vcpu_invalidate_tlb`), most of them Apple-silicon-only. So "79 of 79" is not a claim about the
+whole framework as documented today, and this page does not cover those calls.
 
 ---
 
@@ -119,9 +126,12 @@ and answered `HV_UNSUPPORTED` (mode 2 answers success for debugging only).
 
 ### 1.5 APIC family (33) — **opt-in**
 
-Default VM: all APIC calls answer `HV_UNSUPPORTED`. With boot-arg `amdhv_apic=1`,
-`hv_vm_create(HV_VM_ACCEL_APIC)` is accepted and `hvf-probe --apic` reports **27 ok** out of 32 APIC
-calls. The five `hv_vcpu_exit_*` helpers still return `HV_ERROR`.
+Default VM: all APIC calls answer `HV_UNSUPPORTED`. With boot-arg `amdhv_apic=1` (set on the
+validation host), `hv_vm_create(HV_VM_ACCEL_APIC)` is accepted. On the **post-reboot validation build of this tree**,
+`hvf-probe --apic` reports **27 ok, 5 `HV_ERROR`** out of 32 APIC calls: the low-byte tag fix makes
+`hv_vcpu_apic_get_state`/`put_state` work on macOS 15.8.3, where the state pointer's low byte used
+to make the old 16-bit match see `0x9003`/`0x9004` instead of `0x0003`/`0x0004`. The five
+`hv_vcpu_exit_*` helpers still return `HV_ERROR`.
 
 | API | Status (default → opt-in) | Answered by | What AMDHV does |
 | --- | --- | --- | --- |
@@ -145,8 +155,8 @@ calls. The five `hv_vcpu_exit_*` helpers still return `HV_ERROR`.
 | `hv_vcpu_inject_extint` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Decoded but not injected into the guest. |
 | `hv_vcpu_apic_read` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Private encoding not decoded; read returns 0. |
 | `hv_vcpu_apic_write` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Private encoding not decoded; no side effect. |
-| `hv_vcpu_apic_get_state` | `HV_UNSUPPORTED` → **Yes** | Thread trap 13 | Real LAPIC state, SDK layout, `copyout` from a kernel buffer. |
-| `hv_vcpu_apic_put_state` | `HV_UNSUPPORTED` → **Yes** | Thread trap 13 | Real LAPIC state, `copyin` into a kernel buffer. |
+| `hv_vcpu_apic_get_state` | `HV_UNSUPPORTED` → **Yes (0.3.3)** | Thread trap 13 | Real LAPIC state, SDK layout, `copyout` from a kernel buffer; verified after the 2026-11-26 reboot. |
+| `hv_vcpu_apic_put_state` | `HV_UNSUPPORTED` → **Yes (0.3.3)** | Thread trap 13 | Real LAPIC state, `copyin` into a kernel buffer; same tag fix, verified after the reboot. |
 | `hv_vcpu_exit_info` | **No** | Framework | Read-only page is zero: no `HV_VM_EXITINFO_*` code is published. |
 | `hv_vcpu_exit_init_ap` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_INIT_AP`; never produced. |
 | `hv_vcpu_exit_startup_ap` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_STARTUP_AP`; never produced. |
@@ -179,6 +189,7 @@ core never publishes `HV_VM_EXITINFO_INIT_AP`, `...STARTUP_AP`, `...IOAPIC_EOI`,
 | Limits | 64 vCPUs (65th → `HV_ERROR`), 64 address spaces (65th → `HV_NO_RESOURCES`), 16 GiB per single map. |
 | `HV_CAP_ADDRSPACEMAX` | Verified directly on this host: success, value 64. It is framework-side, not a kext trap. |
 | Shared-page helpers | Register/MSR/VMCS/FP queries do not reach the kernel; look at `Frontend.cpp` flag bits (`0x01` slots, `0x04` MSRs, `0x40` DRs, `0x80` FP, `0x100` TSC). |
+| Conflicting TSC writers | **Fixed in tree:** `hv_vm_sync_tsc` clears the pending relative flag in each vCPU's rw slice and bumps a VM-wide sync generation. Each vCPU records the generation its VMCB has applied, so a sync that lands before, during or between runs reaches that vCPU on its next run and wins over a stale relative request. `tsc_offset_test` covers the decision. |
 
 ---
 
@@ -189,13 +200,13 @@ core never publishes `HV_VM_EXITINFO_INIT_AP`, `...STARTUP_AP`, `...IOAPIC_EOI`,
 | Feature | Status | Implementation / developer note |
 | --- | --- | --- |
 | AMD vendor + SVM CPUID (`8000_0001:ECX[2]`) | **Yes** | `SVM.cpp::probeThisCpu()`. |
-| BIOS SVM enabled (`VM_CR.SVMDIS` clear) | **Yes** | `cpuUsable()` refuses a CPU with `SVMDIS`; locked `VM_CR` is reported, never fought. |
-| `EFER.SVME` on every usable CPU | **Yes** | `enableAction()` / `disableAction()`; `ensureThisCpu()` repairs drift before each VMRUN. |
-| `VM_HSAVE_PA` | **Yes** | `allocHostSave()`: 4 KiB, contiguous, aligned, below 2^52; `kIOMemoryMapperNone` avoids the boot-time mapper wait. |
+| BIOS SVM enabled (`VM_CR.SVMDIS` clear) | **Yes** | `cpuUsable()` refuses a CPU with `SVMDIS`; locked `VM_CR` is reported, never fought. APM §15.30.1: `SVMDIS=1` makes EFER.SVME writes MBZ; `LOCK=1` silently ignores writes to `SVMDIS` (set on this host). |
+| `EFER.SVME` on every usable CPU | **Yes** | `enableAction()` / `disableAction()`; `ensureThisCpu()` repairs drift before each VMRUN and reads EFER back after the WRMSR — a CPU that did not take SVME is not counted active (APM §15.30.1) and VMRUN is refused with `-4`. APM §15.4: VMRUN/VMLOAD/VMSAVE/CLGI/STGI #UD when SVME=0. |
+| `VM_HSAVE_PA` | **Yes** | `allocHostSave()`: 4 KiB, contiguous, 4 KiB-aligned, below 2^52; `kIOMemoryMapperNone` avoids the boot-time mapper wait. Matches APM §15.30.4 (4 KB block, low 12 bits zero, below max physical address). |
 | Late CPUs | **Yes** | `rescan()` enables CPUs that come online after kext start. |
 | Self-test | **Yes** | `verifyAll()`; `amd-info selftest` → `12 of 12 CPUs ok`. |
 | NPT + NRIPS required | **Yes** | VM creation refuses a CPU without both. |
-| 64 vCPUs / 64 logical CPUs | **Yes / Partial** | `AMDHV_MAX_VCPUS_PER_VM=64`; per-CPU tables sized for 64, but this host exercises only 12 (`cpu_number() >= 64` is skipped). |
+| 64 vCPUs / 64 logical CPUs | **Yes / Partial** | `AMDHV_MAX_VCPUS_PER_VM=64` (Apple API); `AMDHV_MAX_CPUS=64`. The kick IPI uses a 64-bit CPU mask (`mp_cpus_call`), so CPUs 64+ cannot be targeted; raising the limit without replacing that mechanism would silently drop `hv_vcpu_interrupt`. `hv_api_constants_test` pins both limits. |
 | GIF discipline | **Yes** | `SvmRun.S`: `CLGI` … `STGI` around VMSAVE/VMLOAD/VMRUN. |
 | Host interrupts during VMRUN | **Yes** | `STI` before VMRUN with `V_INTR_MASKING`; `CLI` after exit. |
 | S3/S4 with live guest | **Partial** | Ordering fix and `sleep_policy_test` pass; real S3 acceptance run still pending. |
@@ -204,17 +215,17 @@ core never publishes `HV_VM_EXITINFO_INIT_AP`, `...STARTUP_AP`, `...IOAPIC_EOI`,
 
 | Feature | Status | Implementation / developer note |
 | --- | --- | --- |
-| VMCB layout (App.B) | **Yes** | `VMCB.hpp` static_asserts: intercept words `000/004/008/00C`, clean `0xC0`, nRIP `0xC8`, insn bytes `0xD0`. |
-| VMCB clean bits | **Yes** | `CleanBits.hpp`; only enabled when CPUID reports `VMCB_CLEAN`. `INT_CTL` and `CR2` stay dirty. |
+| VMCB layout (App.B) | **Yes** | `VMCB.hpp` static_asserts: intercept words `000/004/008/00C`, clean `0xC0`, nRIP `0xC8`, insn bytes `0xD0`. Verified against APM rev. 3.46 Table B-1/B-2 (`000/004/008/00C/010/03C/040/048/050/070/078/080/0A8/0B0/0C0/0C8/0D0/268`). |
+| VMCB clean bits | **Yes** | `CleanBits.hpp`; only enabled when CPUID reports `VMCB_CLEAN`. `INT_CTL` and `CR2` stay dirty. APM §15.15.3: bit 11 = AVIC, bit 12 = CET; `kAllCleanMask=0x0FFF` marks AVIC clean (unused here) and leaves CET untouched. |
 | Always-on intercepts | **Yes** | INTR, NMI, SMI, INIT, CPUID, INVD, SHUTDOWN, I/O, MSR, VMRUN, VMMCALL, VMLOAD, VMSAVE, STGI, CLGI, SKINIT. |
 | Client-driven intercepts | **Yes** | HLT, INVLPG, RDPMC, RDTSC(P), PAUSE, MWAIT, MONITOR, WBINVD, CR0/3/4/8, MOV-DR, exception bitmap, interrupt window. |
 | PAUSE filter | **Yes** | Count 3000, threshold 128, only when CPUID `PauseFilter`/`PauseThresh` are present. |
 | I/O / MSR permission maps | **Yes** | 12 KiB / 8 KiB all-ones; every port/MSR exits to the client; native MSRs clear their bits. |
 | `V_INTR_MASKING`, `V_TPR`, `V_IRQ` | **Yes** | TPR shadow with CR8 exit path; interrupt-window injection. |
-| Event injection / re-injection | **Yes** | `eventInj` + `eventInjErr`; external interrupt and NMI exits re-injected. |
+| Event injection / re-injection | **Yes** | `eventInj` + `eventInjErr`; external interrupt and NMI exits re-injected. VMX type 5 (#BP/#OF) now maps to SVM type 3 (INT3/INTO trap, APM §15.20), type 6 (ICEBP) keeps the INTn skip; `nextRip` is set for software-generated events. |
 | ASID + TLB | **Yes** | One ASID per vCPU; `TLB_FLUSH_BY_ASID` only when translations can be stale; `TLB_FLUSH_ALL` fallback. |
 | Nested paging | **Yes (4 KiB only)** | 4-level walk, `US`/`NX`, permissions AND across levels. |
-| NPF exit info | **Yes** | GPA only used when DecodeAssists `EXITINFO1[32]` says `EXITINFO2` is valid. |
+| NPF exit info | **Yes** | GPA only used when DecodeAssists `EXITINFO1[32]` says `EXITINFO2` is valid. APM §15.25.7: bit 32 = final GPA translation, bit 33 = guest page-table walk; `VmxMap.hpp` sets VMX qual bits 7/8 accordingly. APM Table 15-3 confirms MOV DRx has no bit-63 validity flag — reading GPR from bits 3:0 without checking it is correct. |
 | Guest state save/restore | **Yes** | `VMSAVE host → VMLOAD guest → VMRUN → VMSAVE guest → VMLOAD host`. |
 | Guest EFER, PAT, DR6/DR7, DR0–DR3, `TSC_AUX` | **Yes** | DR0–DR3 manually saved/restored around VMRUN (`VmRun.cpp`); `TSC_AUX` swapped because VMRUN does not. |
 | x87/SSE/AVX + XCR0 | **Yes** | XSAVE areas swapped by hand; PKU bits masked on CPUID leaf 7 because macOS never enables PKRU. |
@@ -237,7 +248,7 @@ reachable through the calls VZ/QEMU/VirtualBox/Android make on this host.
 | 15.25 | GMET, shadow stacks, INVLPGB, vector-5 intercepts | **No** | No CPUID probe or VMCB control write. |
 | 15.27/15.28/15.31 | SKINIT, #SX, SVM key | **No** | Intercept reported to client; no secure loader. |
 | 15.29 | AVIC / x2AVIC | **No** | Feature bit reported but unused. The in-kernel APIC path is opt-in, but AVIC itself is not enabled. |
-| 15.30 | `TscRateMsr` / TSC scaling | **No** | Guest TSC uses offset only. |
+| 15.30 | `TscRateMsr` / TSC scaling | **No** | Guest TSC uses offset only. The CPUID bit is still passed through, so a guest that writes `0xC0000104` gets an emulated no-op instead of scaled TSC. |
 | 15.33 | Nested virtualization (VGIF, vVMSAVE/VMLOAD) | **No** | Host keeps CLGI/STGI; no nested VMRUN path. |
 | 15.34–15.36 | SEV / SEV-ES / SEV-SNP | **No** | No CPUID `8000_001F`, key management, GHCB or RMP handling; Apple exposes no API. |
 | 15.37 | `SPEC_CTRL` virtualization | **No** | Intel MSRs emulated as unsupported; AMD VMCB save field at `0x2E0` reserved. |
@@ -267,7 +278,26 @@ Single-host observations, not a support promise. See `docs/CLIENTS.md`.
 | Priority | Item | Status | Developer note |
 | --- | --- | --- | --- |
 | P0 | `waitForSystemMapper` at boot | **Done** | All physical allocations pass `kIOMemoryMapperNone`. |
-| P0 | Sleep/wake with live VM | **Code done, run pending** | Suspend state set before rendezvous; sleep epoch forces clean-bit/TLB reload. Real S3 still untested. |
+| P0 | APIC get/put-state tag | **Done** | Decode the tag from the low byte of word 0. Host test covers the observed `0x9004` encoding; `hvf-probe --apic` answers `ok` for both calls on the post-reboot validation build. |
+| P0 | EFER.SVME readback after WRMSR | **Partly verified on 0.3.3** | `enableAction()` and `ensureThisCpu()` read EFER back; a CPU that ignored SVME (APM §15.30.1 MBZ while `SVMDIS=1`) is not counted active and guest entry returns `kIOReturnNotReady`. A post-reboot `amd-info selftest` confirmed SVME and `VM_HSAVE_PA` on 12/12 CPUs (`enableFailures = 0`), but a CPU silently ignoring the SVME write cannot be forced on this host. |
+| P0 | `setSpace` / `spaceDestroy` race | **Partly verified on 0.3.3** | `setSpace()` now holds `fRw` read across the root lookup and the `fSpace`/`nestedCr3` bind, so `spaceDestroy()` (write lock) can no longer free the NPT root between them. A post-reboot probe confirmed `HV_BUSY` while bound and success after unbind; the concurrent race itself was not forced. |
+| P0 | `tVmDestroy` double-free / traps on a dying VM | **Partly verified on 0.3.3** | Destroy is claimed under `vm->lock` (second destroy gets `HV_BUSY`); `tVmSyncTsc` and `tVcpuInterrupt` now `vmPin()`/`vmUnpin()` like the other per-VM traps. A post-reboot probe confirmed destroy with a live vCPU is refused (`HV_ERROR`) and a second destroy is refused; the concurrent trap/destroy interleaving was not forced. |
+| P0 | Host-save teardown vs. live vCPU | **Loaded 0.3.3, path untested** | `hv::stop()` reports failure when live VMs exist, and `AMDHV::stop()` skips `disableAll()` then; `disableAll()` also sets a `gStopping` gate checked by `ensureThisCpu()`/`activeOnAllUsable()` before freeing host save pages. |
+| P0 | Sleep/wake with live VM | **Code done, run pending** | Suspend state set before rendezvous; sleep epoch re-read immediately before VMRUN (a full suspend+resume while the thread is frozen no longer leaves stale clean bits); sleep flag is now atomic. Real S3 still untested. |
+| P0 | CPU count vs. kick IPI | **Fixed by reverting the limit** | `AMDHV_MAX_CPUS` is 64: `mp_cpus_call` uses a 64-bit CPU mask, so 256 would silently drop `hv_vcpu_interrupt` on CPU 64+. `hv_api_constants_test` pins it. |
+| P1 | STI shadow next to VMRUN | **Loaded 0.3.3, path untested** | `SvmRun.S` sets host `IF` right after `CLGI`, so the one-instruction STI shadow is consumed before `VMRUN` and cannot leak into the guest's `INTERRUPT_SHADOW` on an early #VMEXIT. |
+| P1 | NMI-window shortcut drops TPR/CR2 | **Loaded 0.3.3, path untested** | TPR and CR2 page-register writes are applied before the NMI-window early return, not after the dirty bits were cleared. |
+| P1 | `tVmCreate` error mapping | **Loaded 0.3.3, path untested** | `vmCreate()` returns its `IOReturn` via an out-param and `tVmCreate()` maps it with `hvFromIo()`; unsupported hardware no longer reports `HV_NO_RESOURCES`. |
+| P1 | `managedOff` on failure | **Loaded 0.3.3, path untested** | The managed-MSR list, ro byte and cache are only mutated when the core accepted the disable. |
+| P1 | `rescan` during suspend | **Loaded 0.3.3, path untested** | Host-save pages are allocated for CPUs that come online while suspended; only the enable rendezvous is gated on `!gSuspended`. |
+| P1 | `enableAll` after partial enable | **Loaded 0.3.3, path untested** | A partial enable is retried for CPUs still off; the stats counter records the delta instead of recounting. |
+| P2 | TSC sync vs. concurrent run | **Verified on 0.3.3** | A dedicated `vm->tscLock`, a VM-wide sync generation and a per-vCPU applied generation serialise `tVmSyncTsc` with `vcpuRun`'s flags snapshot and VMCB offset write. A sync wins whether it lands before, during or between runs; lock order stays `vm->lock → tscLock → fLock` with no inverse path. `tsc_offset_test` covers the decision; a post-reboot probe with a pre-existing vCPU confirmed the VMCB offset changes from 0 to the sync value. |
+| P2 | In-kernel APIC MMIO decode | **Loaded 0.3.3, path untested** | When guest CR0.PG is set, the in-kernel APIC MMIO shortcut is skipped and the NPF goes to the userspace VMM, because guest linear RIP is not a guest physical address. |
+| P2 | Latent `find()` UAF | **Open (no callers)** | The VM registry does not own a reference, so `find()` can retain an object whose refcount already reached zero. No current caller; fix by giving the registry its own reference. |
+| P1 | Intel-only MSRs enabled native | **Verified on 0.3.3** | `mustIntercept()` keeps every MSR the AMD core does not model intercepted (`K_UNKNOWN`), covering `0xDA0`, `0xDC0..0xDDF`, `0x680..0x6DF`, so a forwarded request cannot clear the MSRPM bits and make a Zen guest #GP. `msr_map_test` covers the rule. On this macOS 15.8.3 SDK the framework itself rejects those indices with `HV_BAD_ARGUMENT` before the trap, so the guard is defensive for the calls that do reach the kext. |
+| P2 | Untranslated SVM exits | **Partly fixed** | SMI `0x62` now maps to VMX reason 6 (`OTHER_SMI`), no longer `AMDHV_EXIT_UNHANDLED`; `vmx_map_test` covers it. Other untranslated intercepts still fall back to UNHANDLED with RIP unchanged. NPF reports `instrLen = 0`, which relies on the client re-decoding (QEMU does). |
+| P2 | Software-exception injection type | **Loaded 0.3.3, path untested** | Per APM §15.20 Table 15-11, VMX type 5 (#BP/#OF) maps to SVM type 3 (INT3/INTO trap + DPL check) with a `nextRIP` skip; type 6 (ICEBP, no SVM equivalent) keeps the INTn skip. `vmcs_state_test` covers both encodings. |
+| P2 | NPT reach on Zen 4/5 | **Partial** | 48-bit GPA ceiling remains: a 4-level NPT cannot index a GPA above 2^48 (fixing it needs a 5-level NPT, not a constant change). Host `EFER.NXE` is now checked at VM creation (APM §15.25.8) and a VM is refused if execute permissions could not be enforced. |
 | P0 | Guest `WRMSR 10h` cannot move host TSC | **Done** | MSRPM intercept kept; access emulated against `tscOffset`. |
 | P1 | VMCB clean bits | **Done** | No full state reload after every VMRUN. |
 | P1 | Per-vCPU ASID + `FLUSH_BY_ASID` | **Done** | `amdhv_asid=0` restores flush-every-entry for A/B. |
@@ -279,6 +309,11 @@ Single-host observations, not a support promise. See `docs/CLIENTS.md`.
 | P2 | Full APIC semantics | **Open** | `inject_extint` and most sub-ops still no-ops; opt-in only. |
 | P2 | `hv_vcpu_flush` | **Closed by design** | Apple deprecated it; use `hv_vcpu_invalidate_tlb`. |
 | P3 | AVIC, VGIF, LBRV, SVML, TSC scaling, large NPT leaves | **Open** | Would change the model; not reachable from current clients. |
+
+The fixes in this release were installed and loaded after the 2026-11-26 reboot (the binary was
+stamped 0.3.2 because the v0.3.3 tag did not exist yet). Rows
+marked "Loaded 0.3.3, path untested" contain fixes that are present in the running kext but whose
+specific code path has not been exercised on hardware.
 
 Acceptance for any change: host test + `hvf-probe` (if API surface changes) + one client run +
 `amd-info stats` with `vmInvalidExits = 0` and `assertFailures = 0`.
@@ -302,6 +337,8 @@ A kext change needs a reboot; the running kext cannot be replaced in place.
 | Recorded run | Result | Note |
 | --- | --- | --- |
 | Post-reboot 2026-11-22 | `hvf-smoke` PASS, `hvf-probe` matches matrix | no `waitForSystemMapper` warning; counters clean. |
+| Current tree 2026-11-25 (loaded kext 0.3.1) | `make test` 20/20, `make kext tools` OK (393 symbols), `amd-info selftest` 12/12, `hvf-smoke` PASS, `hvf-probe --matrix` 79/79, all failure counters 0 | `amdhv_apic=1` is set; `--apic` 25 ok / 2 unsupported / 5 error. The 0.3.2 kext with the APIC tag fix is built but not loaded yet. |
+| Reboot 2026-11-26 (validation build of this tree, stamped 0.3.2) | `sysctl kern.hv_support=1`, SVM active on 12/12 CPUs, `hvf-smoke` PASS, `hvf-probe --matrix` 79/79, `--apic` 27 ok / 5 `HV_ERROR`, targeted sync check PASS, extra API checks PASS, `amd-info selftest` 12/12, `vmInvalidExits=0`, `assertFailures=0` | Boot args unchanged. `hvf-probe` reports `set_tsc_relative` wired; a separate probe syncing TSC with a vCPU already created saw its VMCB offset go from 0 to the sync value. Extra checks confirmed space destroy while bound is refused, a second `hv_vm_destroy` is refused, managed/native MSR and TPR/CR2 round-trips work; unknown MSRs are rejected by the framework with `HV_BAD_ARGUMENT`. |
 | VZ guest, 32 min, 6 vCPU / 4 GiB | 35,985,555 VM runs, 36,748,682 exits, 30.5M NPF exits | `vmInvalidExits = 0`, `assertFailures = 0`; EPT-violation path is the hot path. |
 | Limitation validation 2026-11-23 (0.2.0) | 64 vCPUs, 64 spaces, 16 GiB map cap, 2 concurrent VMs | unsigned process created a VM; PIO/APIC/extint answered `HV_UNSUPPORTED`. |
 | S3/S4 attempts | host never reached S3 | `sleepEvents = 0`, `wakeEvents = 0`; not a kext fault. Acceptance still pending. |
@@ -325,7 +362,9 @@ history of this file and in `docs/CLIENTS.md`, `docs/QEMU.md`, `docs/APIC_PENDIN
   Forward check: identical ABI at <https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.121.6/osfmk/kern/hv_support_kext.h>;
   that tag only changes `IKOT_UNKNOWN` → `IOT_ANY` in `hv_io_notifier.c`, which AMDHV does not call.
 - AMD, *AMD64 APM Vol.2*, pub. 24593, rev. 3.46 (Oct 2026), Ch.15 + App.B:
-  <https://docs.amd.com/go/en-US/24593_3.46_APM_Vol2>.
+  <https://docs.amd.com/go/en-US/24593_3.46_APM_Vol2>. Sections checked against this tree:
+  15.4 (enabling), 15.8 (DecodeAssists), 15.15 (clean bits), 15.20 (event injection),
+  15.25 (nested paging), 15.30 (SVM MSRs), App. B (VMCB layout), App. C (exit codes).
 - VMCB cross-checks: Linux `arch/x86/include/asm/svm.h`, FreeBSD `sys/amd64/vmm/amd/vmcb.h`.
 - QEMU HVF on x86: <https://www.qemu.org/docs/master/system/introduction.html>,
   `accel/hvf/hvf-all.c`, `target/i386/hvf/hvf.c`.

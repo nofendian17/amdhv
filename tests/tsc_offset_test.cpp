@@ -55,6 +55,43 @@ void testRelativeIsAddedOnce()
     CHECK((amdhv::tsc::kRelativeFlag & 0x4) == 0);   /* not the MSR-cache flag */
 }
 
+void testSyncTscConsumesTheRelativeRequest()
+{
+    /* hv_vm_sync_tsc is the last writer: a pending set_tsc_relative request must not survive it,
+     * or the next run reapplies (adjust - base) + relative over the VM-wide offset. */
+    const uint64_t flagsWithRelative = amdhv::tsc::kRelativeFlag | 0x01 | 0x04;
+    CHECK(amdhv::tsc::flagsAfterSync(flagsWithRelative) == (0x01 | 0x04));
+    CHECK(amdhv::tsc::flagsAfterSync(0x01) == 0x01);   /* other flags are untouched */
+    /* A consumed request must not be applied by a later run. */
+    CHECK(amdhv::tsc::relativeApplies(flagsWithRelative));
+    CHECK(!amdhv::tsc::relativeApplies(amdhv::tsc::flagsAfterSync(flagsWithRelative)));
+    /* A sync between the flags snapshot and the write invalidates the captured request. */
+    CHECK(amdhv::tsc::relativeApplies(flagsWithRelative, 7, 7));
+    CHECK(!amdhv::tsc::relativeApplies(flagsWithRelative, 7, 8));
+}
+
+void testSyncBetweenRunsIsAppliedToAnExistingVcpu()
+{
+    const uint64_t flagsWithRelative = amdhv::tsc::kRelativeFlag | 0x01;
+
+    /* A sync that completed before this run started still has to reach a vCPU created earlier:
+     * its applied generation lags the VM's generation even though no change happens during the run. */
+    CHECK(amdhv::tsc::chooseOffset(amdhv::tsc::flagsAfterSync(flagsWithRelative), 1, 1, 0) ==
+          amdhv::tsc::OffsetChoice::Sync);
+
+    /* A relative request written after a still-unapplied sync waits one run: the sync wins first. */
+    CHECK(amdhv::tsc::chooseOffset(flagsWithRelative, 1, 1, 0) == amdhv::tsc::OffsetChoice::Sync);
+
+    /* With no sync pending, a relative request is applied once. */
+    CHECK(amdhv::tsc::chooseOffset(flagsWithRelative, 1, 1, 1) == amdhv::tsc::OffsetChoice::Relative);
+
+    /* A sync landing after the run's snapshot wins over the captured relative request. */
+    CHECK(amdhv::tsc::chooseOffset(flagsWithRelative, 1, 2, 1) == amdhv::tsc::OffsetChoice::Sync);
+
+    /* Nothing pending: leave the VMCB offset as it is. */
+    CHECK(amdhv::tsc::chooseOffset(0x01, 1, 1, 1) == amdhv::tsc::OffsetChoice::None);
+}
+
 } // namespace
 
 int main()
@@ -63,6 +100,8 @@ int main()
     testClockAdjustIsFoldedIn();
     testWrapsLikeTheHardware();
     testRelativeIsAddedOnce();
+    testSyncTscConsumesTheRelativeRequest();
+    testSyncBetweenRunsIsAppliedToAnExistingVcpu();
     if (fails) {
         printf("tsc_offset_test: %d failure(s)\n", fails);
         return 1;

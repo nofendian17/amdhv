@@ -208,6 +208,7 @@ enum : uint8_t { TLB_DO_NOTHING = 0, TLB_FLUSH_ALL = 1, TLB_FLUSH_BY_ASID = 3 };
 enum : uint64_t {
     EXIT_INTR     = 0x60,
     EXIT_NMI      = 0x61,
+    EXIT_SMI      = 0x62,
     EXIT_CPUID    = 0x72,
     EXIT_HLT      = 0x78,
     EXIT_IOIO     = 0x7B,

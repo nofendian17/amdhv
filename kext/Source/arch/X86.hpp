@@ -13,6 +13,8 @@
 #define AMDHV_MSR_VM_CR       0xC0010114u
 #define AMDHV_MSR_VM_HSAVE_PA 0xC0010117u
 
+#define AMDHV_CR0_PG          (1ull << 31)
+#define AMDHV_EFER_NXE        (1ull << 11)
 #define AMDHV_EFER_SVME       (1ull << 12)
 #define AMDHV_VM_CR_LOCK      (1ull << 3)
 #define AMDHV_VM_CR_SVMDIS    (1ull << 4)

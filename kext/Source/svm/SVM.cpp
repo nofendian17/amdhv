@@ -44,7 +44,8 @@ volatile SInt32           gHealed;    /* times ensureThisCpu() restored EFER.SVM
 volatile SInt32           gSeen;      /* CPUs that ran probeAction */
 volatile SInt32           gMaxIndex;  /* highest cpu_number() seen */
 volatile bool             gReadMsrs = true;   /* set before the probe rendezvous */
-bool                      gSuspended;
+volatile bool             gSuspended;
+volatile bool             gStopping;           /* disableAll() rendezvous: no new guest entries */
 uint64_t                  gSleepEpoch;          /* bumped on suspend/resume: see SleepPolicy.hpp */
 
 /**
@@ -156,10 +157,16 @@ void enableAction(void *)
     if (!cpuUsable(gProbe[cpu]) || !gHostSavePa[cpu])
         return;
 
-    /* Read-modify-write: keep every EFER bit the kernel already relies on. */
+    /* Read-modify-write: keep every EFER bit the kernel already relies on. APM 15.30.1 makes SVME
+     * an MBZ write while VM_CR.SVMDIS is set, so verify the write before counting this CPU as on. */
     uint64_t efer = amdhv_rdmsr(AMDHV_MSR_EFER);
-    if (!(efer & AMDHV_EFER_SVME))
+    if (!(efer & AMDHV_EFER_SVME)) {
         amdhv_wrmsr(AMDHV_MSR_EFER, efer | AMDHV_EFER_SVME);
+        if (!(amdhv_rdmsr(AMDHV_MSR_EFER) & AMDHV_EFER_SVME)) {
+            AMDHV_ERR("cpu %u: EFER.SVME stayed clear (SVMDIS set), not counted as active", cpu);
+            return;
+        }
+    }
     amdhv_wrmsr(AMDHV_MSR_VM_HSAVE_PA, gHostSavePa[cpu]);
 
     gOn[cpu] = 1;
@@ -343,10 +350,9 @@ uint32_t enableAll()
 {
     AMDHV_STAT_INC(enableCalls);
 
-    if (gActive) {
-        AMDHV_WARN("enableAll: already active on %d CPUs", (int)gActive);
-        return (uint32_t)gActive;
-    }
+    const uint32_t before = (uint32_t)gActive;
+    if (before && before == usableCount())
+        return before;                 /* fully enabled, nothing to retry */
 
     for (uint32_t i = 0; i < gNCpus; i++) {
         if (cpuUsable(gProbe[i]) && !allocHostSave(i)) {
@@ -363,7 +369,7 @@ uint32_t enableAll()
     mp_rendezvous_no_intrs(enableAction, nullptr);
 
     uint32_t active = (uint32_t)gActive;
-    AMDHV_STAT_ADD(enableCpusOk, active);
+    AMDHV_STAT_ADD(enableCpusOk, active - before);   /* CPUs added by this call, not a recount */
     if (active != usableCount()) {
         AMDHV_ERR("enableAll: only %u of %u CPUs took the enable path", active, usableCount());
         AMDHV_STAT_INC(enableFailures);
@@ -381,6 +387,11 @@ void disableAll()
 {
     AMDHV_STAT_INC(disableCalls);
 
+    /* Close the door before the rendezvous: a vCPU that passes activeOnAllUsable() here could
+     * otherwise re-enable SVME in ensureThisCpu() after disableAction ran, then take #VMEXIT
+     * into a host save page that freeHostSave() is about to release. */
+    __atomic_store_n(&gStopping, true, __ATOMIC_SEQ_CST);
+
     if (gActive) {
         AMDHV_SYNC("disabling SVM on all CPUs");
         mp_rendezvous_no_intrs(disableAction, nullptr);
@@ -388,8 +399,9 @@ void disableAll()
     }
     bzero(gOn, sizeof(gOn));
     gWantEnabled = false;
-    gSuspended   = false;
+    __atomic_store_n(&gSuspended, false, __ATOMIC_RELEASE);
     freeHostSave();
+    __atomic_store_n(&gStopping, false, __ATOMIC_RELEASE);
 }
 
 /**
@@ -447,7 +459,7 @@ void suspend()
  */
 uint32_t resume()
 {
-    if (!gSuspended)
+    if (!__atomic_load_n(&gSuspended, __ATOMIC_ACQUIRE))
         return 0;
     if (!gWantEnabled) {
         /* Defensive: a suspended flag with SVM never enabled (or already stopped) must not turn
@@ -535,7 +547,8 @@ uint32_t activeCpuCount()
  */
 bool activeOnAllUsable()
 {
-    return canEnterGuest(gSuspended, (uint32_t)gActive, usableCount());
+    return canEnterGuest(__atomic_load_n(&gSuspended, __ATOMIC_ACQUIRE) ||
+                         __atomic_load_n(&gStopping, __ATOMIC_ACQUIRE), (uint32_t)gActive, usableCount());
 }
 
 /**
@@ -547,7 +560,7 @@ int ensureThisCpu()
 {
     /* A suspend may be in progress on another CPU. Do not repair EFER.SVME/VM_HSAVE_PA now: the
      * suspend rendezvous is about to clear them (or already did), and the caller must not VMRUN. */
-    if (gSuspended)
+    if (__atomic_load_n(&gSuspended, __ATOMIC_ACQUIRE) || __atomic_load_n(&gStopping, __ATOMIC_ACQUIRE))
         return -3;
 
     int cpu = cpu_number();
@@ -561,8 +574,13 @@ int ensureThisCpu()
     uint64_t hsave = amdhv_rdmsr(AMDHV_MSR_VM_HSAVE_PA);
     if ((efer & AMDHV_EFER_SVME) && hsave == gHostSavePa[cpu])
         return 0;
-    if (!(efer & AMDHV_EFER_SVME))
+    if (!(efer & AMDHV_EFER_SVME)) {
         amdhv_wrmsr(AMDHV_MSR_EFER, efer | AMDHV_EFER_SVME);
+        /* APM 15.30.1: with SVMDIS set the SVME write is silently ignored. Never let VMRUN reach
+         * CLGI with SVME clear -- that is #UD in kernel mode. */
+        if (!(amdhv_rdmsr(AMDHV_MSR_EFER) & AMDHV_EFER_SVME))
+            return -4;
+    }
     if (hsave != gHostSavePa[cpu])
         amdhv_wrmsr(AMDHV_MSR_VM_HSAVE_PA, gHostSavePa[cpu]);
     /* enableAll/rescan count a CPU in gOn/gActive only when enableAction ran; if EFER/HSAVE drifted later we repaired
@@ -634,14 +652,17 @@ uint32_t rescan()
                  (int)gNewCpus, gNCpus, usableCount());
     }
 
-    if (gWantEnabled && !gSuspended) {
+    if (gWantEnabled) {
         bool need = false;
         for (uint32_t i = 0; i < gNCpus; i++) {
             if (!cpuUsable(gProbe[i]) || gOn[i])
                 continue;
+            /* Allocate even while suspended: wake's enableAction() skips CPUs without a save
+             * page, and the allocation itself is safe with the host asleep. */
             if (!gHostSavePa[i] && !allocHostSave(i))
                 continue;
-            need = true;
+            if (!__atomic_load_n(&gSuspended, __ATOMIC_ACQUIRE))
+                need = true;
         }
         if (need) {
             int before = (int)gActive;

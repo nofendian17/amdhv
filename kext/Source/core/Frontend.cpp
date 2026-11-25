@@ -165,6 +165,7 @@ struct HvVcpu {
     uint32_t cpuidSub;
     uint64_t cr2Page;          /* the CR2 word of the page as this driver last left it: a different value is the client's write (an injected #PF needs it) and is applied */
     uint64_t tprPage;          /* the TPR word of the page as this driver last left it: the client's write is applied when it differs */
+    uint64_t tscAppliedGen;    /* VM sync generation already written to this vCPU's VMCB */
     bool     tprLogged;        /* the client's first TPR-shadow use is logged once */
     uint8_t  managedIdx[256];  /* position in the list -> MSR cache index, 0 = a hole */
     amdhv::apic::LapicState lapic;  /* in-kernel APIC state of this vCPU */
@@ -183,6 +184,8 @@ struct HvVm {
     uint32_t roArrOff;                         /* offset of the per-vCPU 4 KiB pages (managed MSR lists) in the ro area */
     uint64_t tscOffset;                        /* from hv_vm_sync_tsc, handed to vCPUs created later */
     bool     tscValid;
+    IOLock  *tscLock;                          /* serialises vm_sync_tsc with a run's TSC decision */
+    volatile uint64_t tscGen;                  /* bumped by every vm_sync_tsc */
     bool     apicAccel;                        /* created with HV_VM_ACCEL_APIC (opt-in, see gApicAccel) */
     uint64_t caps[amdhv::vmx::CAP_COUNT];      /* the VMX capability words this VM's client was shown (HV_VMX_CAP_*), also what thread trap 12 answers from */
     amdhv::apic::IoApicState ioapic;           /* in-kernel APIC state (opt-in VMs) */
@@ -262,6 +265,8 @@ void vmFree(HvVm *vm)
         if (vm->md[i])
             vm->md[i]->release();
     }
+    if (vm->tscLock)
+        IOLockFree(vm->tscLock);
     if (vm->lock)
         IOLockFree(vm->lock);
     IOFree(vm, sizeof(HvVm));
@@ -269,8 +274,9 @@ void vmFree(HvVm *vm)
 }
 
 /** Allocates the three areas, maps them into the calling task, fills the interface block. */
-HvVm *vmCreate(uint64_t *info)
+HvVm *vmCreate(uint64_t *info, IOReturn *err)
 {
+    *err = kIOReturnNoMemory;
     HvVm *vm = (HvVm *)IOMallocZero(sizeof(HvVm));
     if (!vm)
         return nullptr;
@@ -280,6 +286,11 @@ HvVm *vmCreate(uint64_t *info)
     OSIncrementAtomic(&gLiveVms);                    /* balanced by vmFree, which every failure path below also reaches */
     vm->lock = IOLockAlloc();
     if (!vm->lock) {
+        vmFree(vm);
+        return nullptr;
+    }
+    vm->tscLock = IOLockAlloc();
+    if (!vm->tscLock) {
         vmFree(vm);
         return nullptr;
     }
@@ -308,6 +319,7 @@ HvVm *vmCreate(uint64_t *info)
         /* The ro area and the commpage are read-only for the client. */
         vm->map[i] = vm->md[i]->createMappingInTask(task, 0, kIOMapAnywhere | (i == 0 ? 0 : kIOMapReadOnly));
         if (!vm->map[i]) {
+            *err = kIOReturnVMError;
             vmFree(vm);
             return nullptr;
         }
@@ -315,10 +327,11 @@ HvVm *vmCreate(uint64_t *info)
 
     vm->fpStride = fpStride;
     vm->roArrOff = roOffArr;
-    IOReturn err = kIOReturnSuccess;
-    vm->shared = com_amdhv_AMDHVVmShared::create(task, &err);
+    IOReturn sharedErr = kIOReturnSuccess;
+    vm->shared = com_amdhv_AMDHVVmShared::create(task, &sharedErr);
     if (!vm->shared) {
-        AMDHV_WARN("hv front end: cannot create the shared VM (0x%x)", err);
+        AMDHV_WARN("hv front end: cannot create the shared VM (0x%x)", sharedErr);
+        *err = sharedErr;
         vmFree(vm);
         return nullptr;
     }
@@ -380,9 +393,10 @@ kern_return_t tVmCreate(void *target, uint64_t arg)
     if ((a.flags & amdhv::hv::kVmAccelApic) && !gApicAccel)
         return kHvUnsupportedCode;              /* the in-kernel APIC variant is opt-in while its handlers are built */
     uint64_t info[kInfoBytes / 8];
-    HvVm *vm = vmCreate(info);
+    IOReturn err = kIOReturnSuccess;
+    HvVm *vm = vmCreate(info, &err);
     if (!vm)
-        return kHvNoRes;
+        return hvFromIo(err);
     vm->apicAccel = (a.flags & amdhv::hv::kVmAccelApic) != 0;
     if (vm->apicAccel)
         AMDHV_INFO("hv front end: VM created with the in-kernel APIC requested");
@@ -408,14 +422,15 @@ kern_return_t tVmDestroy(void *target, uint64_t arg)
     HvVm *vm = static_cast<HvVm *>(target);
     if (!vm)
         return kHvNoDev;
+    /* Claim destruction under the same lock vmPin() uses. A second destroy on this task must
+     * not free the VM twice, and a trap that already pinned it must not lose its lock. */
     IOLockLock(vm->lock);
-    unsigned n = vm->nVcpus;
-    int inflight = vm->inFlight;
-    if (!n && !inflight)
-        vm->dying = true;
+    if (vm->dying || vm->nVcpus || vm->inFlight) {
+        IOLockUnlock(vm->lock);
+        return kHvBusy;
+    }
+    vm->dying = true;
     IOLockUnlock(vm->lock);
-    if (n || inflight)
-        return kHvBusy;                              /* a trap or vCPU still holds it: never free under it */
     hv_set_task_target(nullptr);
     vmFree(vm);
     {                                   /* this shows that the teardown came back (a hung exit has no such line) */
@@ -501,8 +516,10 @@ kern_return_t tVcpuCreate(void *target, uint64_t arg)
     memset(v->ro + kRoMsrPos, 0xff, amdhv::hv::kMsrCacheMax + 1);               /* no MSR is managed yet */
     v->msrPage = vm->kva[1] + vm->roArrOff + id * 0x1000u;
     bzero(v->msrPage, 0x1000);
-    if (vm->tscValid)
+    if (vm->tscValid) {
         v->cpu->vmcsWrite(0x2010, vm->tscOffset);      /* a vCPU created after hv_vm_sync_tsc gets the same offset */
+        v->tscAppliedGen = vm->tscGen;                 /* already applied: the next run must not redo it */
+    }
     vm->vcpu[id] = v;
     vm->nVcpus++;
     IOLockUnlock(vm->lock);
@@ -800,6 +817,8 @@ kern_return_t managedOff(HvVcpu *v, unsigned idx)
     uint64_t val = 0;
     __builtin_memcpy(&val, v->msrPage + pos * 16 + 8, 8);
     IOReturn rc = v->cpu->msrOp(AMDHV_MSR_NATIVE_DISABLE, amdhv::hv::kMsrOfIdx[idx], 0, &val);
+    if (rc != kIOReturnSuccess)
+        return hvFromIo(rc);               /* keep the managed list and cache intact on failure */
     v->managedIdx[pos] = 0;                                /* the list keeps a hole, positions never move */
     v->ro[kRoMsrPos + idx] = 0xff;
     __builtin_memcpy(&val, v->msrPage + pos * 16 + 8, 8);
@@ -807,7 +826,7 @@ kern_return_t managedOff(HvVcpu *v, unsigned idx)
     msrSetValid(v, idx, true);
     v->applied[idx] = val;
     v->appliedKnown[idx] = 1;
-    return rc == kIOReturnSuccess ? kHvOk : hvFromIo(rc);
+    return kHvOk;
 }
 
 /**
@@ -855,18 +874,26 @@ kern_return_t tVmSyncTsc(void *target, uint64_t tsc)
 {
     note(HV_TASK_TRAP, 7, tsc);
     HvVm *vm = static_cast<HvVm *>(target);
-    if (!vm)
-        return kHvNoDev;
+    if (!vmPin(vm))
+        return vm ? kHvBusy : kHvNoDev;
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t offset = tsc - (((uint64_t)hi << 32) | lo);
     IOLockLock(vm->lock);
+    IOLockLock(vm->tscLock);
     vm->tscOffset = offset;
     vm->tscValid = true;
+    /* The actual VMCB write is deferred to the next run, which holds fLock. Doing it here while
+     * holding vm->lock would invert the vm->lock -> tscLock -> fLock order against a run. */
+    __atomic_add_fetch(&vm->tscGen, 1, __ATOMIC_RELEASE);
     for (unsigned id = 0; id < kMaxVcpus; id++)
-        if (vm->vcpu[id] && vm->vcpu[id]->cpu)
-            vm->vcpu[id]->cpu->vmcsWrite(0x2010, offset);
+        if (vm->vcpu[id]) {
+            uint64_t *flags = reinterpret_cast<uint64_t *>(vm->vcpu[id]->rw);
+            *flags = amdhv::tsc::flagsAfterSync(*flags);
+        }
+    IOLockUnlock(vm->tscLock);
     IOLockUnlock(vm->lock);
+    vmUnpin(vm);
     return kHvOk;
 }
 
@@ -915,7 +942,10 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
     uint64_t *r8_15[8] = {&regs.r8, &regs.r9, &regs.r10, &regs.r11, &regs.r12, &regs.r13, &regs.r14, &regs.r15};
     for (unsigned i = 0; i < 8; i++)
         *r8_15[i] = *gprWord(v, R_R8 + i);
+    IOLockLock(v->vm->tscLock);
     const uint64_t flags = *reinterpret_cast<uint64_t *>(v->rw);   /* 0x01 slots, 0x04 MSRs, 0x08 misc; 0x20 XCR0, 0x40 DRs, 0x80 FP state, 0x100 TSC */
+    const uint64_t tscGenAtEntry = (uint64_t)__atomic_load_n(&v->vm->tscGen, __ATOMIC_ACQUIRE);
+    IOLockUnlock(v->vm->tscLock);
     uint64_t dirty[2] = {*dirtyWord(v, 0), *dirtyWord(v, 1)};
     auto isDirty = [&](unsigned slot) { return (dirty[slot >> 6] >> (slot & 63)) & 1; };
     if (isDirty(kSlotRsp))
@@ -977,7 +1007,11 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
     /* hv_vcpu_set_tsc_relative: the framework records the requested value in the rw slice and sets
      * flag 0x100. The guest must read hv_tsc_clock() + value, and hv_tsc_clock() is rdtsc plus the
      * commpage's (adjust - base), so both terms go into the VMCB TSC offset. */
-    if (flags & amdhv::tsc::kRelativeFlag) {
+    IOLockLock(v->vm->tscLock);
+    const uint64_t tscGenNow = (uint64_t)__atomic_load_n(&v->vm->tscGen, __ATOMIC_ACQUIRE);
+    const amdhv::tsc::OffsetChoice tscChoice =
+        amdhv::tsc::chooseOffset(flags, tscGenAtEntry, tscGenNow, v->tscAppliedGen);
+    if (tscChoice == amdhv::tsc::OffsetChoice::Relative) {
         const volatile uint64_t *comm = reinterpret_cast<const volatile uint64_t *>(v->vm->kva[2]);
         const uint64_t rel = *reinterpret_cast<const uint64_t *>(v->rw + kRwTscRelative);
         const uint64_t off = amdhv::tsc::guestOffset(comm[0], comm[1], rel);
@@ -988,7 +1022,20 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
                 AMDHV_INFO("hv front end: TSC offset %#llx refused by the core (0x%x)", (unsigned long long)off,
                          (unsigned)tr);
         }
+    } else if (tscChoice == amdhv::tsc::OffsetChoice::Sync && v->vm->tscValid) {
+        /* The sync may have landed before this run even started: this vCPU's VMCB has not taken
+         * the VM-wide offset yet, so it wins over a relative request captured at entry. */
+        IOReturn tr = cpu->vmcsWrite(0x2010, v->vm->tscOffset);
+        if (tr != kIOReturnSuccess) {
+            static volatile SInt32 syncLogged;
+            if (OSIncrementAtomic(&syncLogged) < 3)
+                AMDHV_INFO("hv front end: VM-wide TSC offset %#llx refused by the core (0x%x)",
+                           (unsigned long long)v->vm->tscOffset, (unsigned)tr);
+        } else {
+            v->tscAppliedGen = tscGenNow;             /* retry on the next run if the write was refused */
+        }
     }
+    IOLockUnlock(v->vm->tscLock);
     /* Debug registers (DR7 is a slot and went with the others). */
     if (flags & 0x40) {
         for (unsigned n = 0; n < 4; n++)
@@ -1013,6 +1060,26 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
                 if (OSIncrementAtomic(&logged) < 20)
                     AMDHV_INFO("hv front end: MSR %#x write refused by the core (0x%x), value %#llx", msr, mr, (unsigned long long)val);
             }
+        }
+    }
+
+    /* HV_X86_TPR is the 8-bit APIC TPR (class in bits 7:4); the core's V_TPR is the 4-bit class. A monitor decides from it whether it may inject an
+     * interrupt and answers the guest's CR8 reads from it, so a write has to reach the core and read back (read<<4, write>>4). */
+    {
+        const uint64_t tpr = *gprWord(v, R_TPR);
+        if (v->vm->apicAccel)
+            v->lapic.tpr = (uint32_t)tpr;
+        if (tpr != v->tprPage) {
+            cpu->vmcsWrite(0xF004, (tpr >> 4) & 0xF);
+            v->tprPage = tpr;
+        }
+    }
+    {
+        /* CR2 is a register of the page, not a VMCS slot: a client that injects a #PF writes it there first. */
+        const uint64_t cr2 = *gprWord(v, R_CR2);
+        if (cr2 != v->cr2Page) {
+            cpu->vmcsWrite(0xF000, cr2);
+            v->cr2Page = cr2;
         }
     }
 
@@ -1072,25 +1139,6 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
     v->in.flags = AMDHV_RUN_REGS;
     v->in.nWrites = 0;
     v->in.regs = regs;
-    /* HV_X86_TPR is the 8-bit APIC TPR (class in bits 7:4); the core's V_TPR is the 4-bit class. A monitor decides from it whether it may inject an
-     * interrupt and answers the guest's CR8 reads from it, so a write has to reach the core and read back (read<<4, write>>4). */
-    {
-        const uint64_t tpr = *gprWord(v, R_TPR);
-        if (v->vm->apicAccel)
-            v->lapic.tpr = (uint32_t)tpr;
-        if (tpr != v->tprPage) {
-            cpu->vmcsWrite(0xF004, (tpr >> 4) & 0xF);
-            v->tprPage = tpr;
-        }
-    }
-    {
-        /* CR2 is a register of the page, not a VMCS slot: a client that injects a #PF writes it there first. */
-        const uint64_t cr2 = *gprWord(v, R_CR2);
-        if (cr2 != v->cr2Page) {
-            cpu->vmcsWrite(0xF000, cr2);
-            v->cr2Page = cr2;
-        }
-    }
     const uint64_t inRax = regs.rax, inRcx = regs.rcx, inRdx = regs.rdx;       /* what the client set before this entry */
     IOReturn rc = cpu->runEx(&v->in, &v->out, deadline);
     if (rc != kIOReturnSuccess) {
@@ -1232,13 +1280,14 @@ kern_return_t tVcpuInterrupt(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 13, arg);
     HvVm *vm = static_cast<HvVm *>(target);
-    if (!vm)
-        return kHvNoDev;
+    if (!vmPin(vm))
+        return vm ? kHvBusy : kHvNoDev;
     IOLockLock(vm->lock);                              /* a vCPU cannot be freed while the lock is held */
     for (unsigned id = 0; id < kMaxVcpus; id++)
         if (((arg >> id) & 1) && vm->vcpu[id] && vm->vcpu[id]->cpu)
             vm->vcpu[id]->cpu->kick();
     IOLockUnlock(vm->lock);
+    vmUnpin(vm);
     return kHvOk;
 }
 
@@ -1513,9 +1562,9 @@ kern_return_t tLapicMsi(void *target, uint64_t arg)
     return target ? kHvOk : kHvNoDev;
 }
 
-/** Thread trap 13: per-vCPU APIC sub-ops. Pointer words are shifted left by 8; the low byte is a
- * tag (0x8001 apic_read, 0x8002 apic_write, 3 put_state, 4 get_state) or a small code for
- * ctrl/LVT/LSC. The SDK ext structs put state at +8 (after version and padding). */
+/** Thread trap 13: per-vCPU APIC sub-ops. The tag is the low byte of word 0 and the state pointer
+ * is word 0 shifted right by 8; apic_read/apic_write use 16-bit tags and put their result pointer
+ * in word 1. The SDK ext structs put state at +8 (after version and padding). */
 kern_return_t tApicSubOp(void *target, uint64_t arg)
 {
     note(HV_THREAD_TRAP, 13, arg);
@@ -1525,44 +1574,43 @@ kern_return_t tApicSubOp(void *target, uint64_t arg)
     uint64_t w[4] = {0, 0, 0, 0};
     if (copyin((user_addr_t)arg, w, sizeof(w)) != 0)
         return kHvError;
-    const unsigned code = (unsigned)w[0] & 0xFFFF;
-    /* The result/flag pointer is w[1] >> 8. hv_vcpu_apic_read/write use a private, multiply
-     * indirect argument encoding: scanning client memory never shows the offset/value as plain
-     * words, so decoding it would be guesswork that costs a reboot per attempt. Accept the calls
-     * as compatibility no-ops (read returns zero) and keep the SDK-defined get/put state real. */
-    const user_addr_t out = (user_addr_t)(w[1] >> 8);
-    switch (code) {
-    case 0x8001: {                                   /* apic_read */
+    const unsigned code = (unsigned)w[0] & 0xFFFF;   /* 16-bit tags: apic_read / apic_write */
+    const unsigned tag = amdhv::hv::apicTag(w[0]);   /* byte tags: all pointer-encoded sub-ops */
+    /* hv_vcpu_apic_read/write use a private, multiply indirect argument encoding: scanning client
+     * memory never shows the offset/value as plain words, so decoding it would be guesswork that
+     * costs a reboot per attempt. Accept the calls as compatibility no-ops (read returns zero). */
+    if (code == 0x8001) {                            /* apic_read */
+        const user_addr_t out = (user_addr_t)(w[1] >> 8);
         const uint32_t zero = 0;
         return (out && copyout(&zero, out, 4)) ? kHvError : kHvOk;
     }
-    case 0x8002: {                                   /* apic_write */
+    if (code == 0x8002) {                            /* apic_write */
+        const user_addr_t out = (user_addr_t)(w[1] >> 8);
         const uint8_t noSideEffect = 1;
         return (out && copyout(&noSideEffect, out, 1)) ? kHvError : kHvOk;
     }
-    case 0xe003:                                     /* put_state */
-    case 0x0003: {
+    const user_addr_t state = (user_addr_t)amdhv::hv::apicPointer(w[0]);
+    switch (tag) {
+    case 0x03: {                                     /* put_state */
         uint8_t buf[8 + sizeof(amdhv::apic::LapicState)];
-        if (copyin((user_addr_t)(w[0] >> 8), buf, sizeof(buf)))
+        if (copyin(state, buf, sizeof(buf)))
             return kHvError;
         return amdhv::apic::decodeState(v->lapic, buf) ? kHvOk : kHvError;
     }
-    case 0xe004:                                     /* get_state */
-    case 0x0004: {
+    case 0x04: {                                     /* get_state */
         uint8_t buf[8 + sizeof(amdhv::apic::LapicState)];
         amdhv::apic::encodeState(v->lapic, buf);
-        return copyout(buf, (user_addr_t)(w[0] >> 8), sizeof(buf)) ? kHvError : kHvOk;
+        return copyout(buf, state, sizeof(buf)) ? kHvError : kHvOk;
     }
-    case 0x0006:                                     /* apic_ctrl */
-        return kHvOk;
-    case 0x0107:                                     /* trigger_lvt */
-    case 0x0005:                                     /* LSC enter / invalidate */
-    case 0x0000:                                     /* inject_extint */
+    case 0x06:                                       /* apic_ctrl */
+    case 0x07:                                       /* trigger_lvt */
+    case 0x05:                                       /* LSC enter / invalidate */
+    case 0x00:                                       /* inject_extint */
         return kHvOk;
     default: {
         static volatile SInt32 logged;
         if (OSIncrementAtomic(&logged) < 8)
-            AMDHV_INFO("hv front end: APIC subop %#llx unknown code %#x", (unsigned long long)arg, code);
+            AMDHV_INFO("hv front end: APIC subop %#llx unknown tag %#x", (unsigned long long)arg, tag);
         return kHvUnsupportedCode;
     }
     }
@@ -1867,10 +1915,10 @@ void start(com_amdhv_AMDHV *service)
 /**
  * @brief Stop state.
  */
-void stop()
+bool stop()
 {
     setSysctl(false);
-    setMode(0);
+    return setMode(0);
 }
 
 } // namespace hv

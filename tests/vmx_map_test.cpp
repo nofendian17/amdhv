@@ -181,6 +181,7 @@ void testExits()
     CHECK(translateExit(ex(0x7D), &v) && v.reason == VMX_TASK_SWITCH);
     CHECK(translateExit(ex(0x8A), &v) && v.reason == VMX_MONITOR);
     CHECK(translateExit(ex(0x8B), &v) && v.reason == VMX_MWAIT);
+    CHECK(translateExit(ex(EXIT_SMI), &v) && v.reason == VMX_OTHER_SMI && v.instrLen == 0);
 
     /* MSR: EXITINFO1 0 = RDMSR, 1 = WRMSR. */
     CHECK(translateExit(ex(EXIT_MSR, 0), &v) && v.reason == VMX_RDMSR);

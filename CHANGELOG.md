@@ -5,6 +5,49 @@ semantic versioning. The `v*` git tag is the release version: `kext/Makefile` st
 built `Info.plist`. The value committed in `kext/Info.plist` is only a fallback for source archives
 made with `git archive`, which have no tag metadata.
 
+## [0.3.3] — 2026-11-26
+
+### Fixed
+- `hv_vm_sync_tsc` and the run loop share a TSC lock, a VM-wide sync generation and a per-vCPU
+  applied generation. A sync that lands before, during or between runs reaches every vCPU on its
+  next run and wins over a stale `set_tsc_relative` request. `tsc_offset_test` covers the decision;
+  a post-reboot probe confirmed the VMCB offset changes from 0 to the sync value for a vCPU created
+  before the sync.
+- `setSpace()` holds `fRw` across the NPT-root lookup and bind, and `tVmDestroy` claims destruction
+  under `vm->lock`; a second destroy and traps on a dying VM are refused. `tVmSyncTsc` and
+  `tVcpuInterrupt` now pin the VM.
+- Teardown keeps SVM on while live VMs exist; `disableAll()` sets a `gStopping` gate that new guest
+  entries check before host save pages are freed. The PM notifier is removed before teardown and
+  `super::stop()` is always called.
+- The sleep epoch and flag are rechecked immediately before VMRUN, with the suspend flag now atomic;
+  `rescan()` allocates host-save pages while suspended and `enableAll()` retries a partial enable.
+- STI is moved out of VMRUN's interrupt shadow; TPR and CR2 page writes are applied before the
+  NMI-window early return. VMCB clean bits and the TLB are reloaded when a full suspend/resume
+  completes while a thread is frozen.
+- `tVmCreate()` maps its real `IOReturn`, `managedOff()` keeps managed-MSR state intact when the
+  core refuses a disable, and the user client rejects 64-bit scalars before truncating selectors.
+- The in-kernel APIC MMIO shortcut is skipped when guest CR0.PG is set: VMCB `save.rip` is linear
+  while `guestBytes()` takes a guest physical address.
+- `tApicSubOp` decodes the sub-op tag from the low byte of word 0, so
+  `hv_vcpu_apic_get_state`/`put_state` work on macOS 15.8.3 (`0x9003`/`0x9004` instead of
+  `0x0003`/`0x0004`). Verified on hardware after the reboot: `--apic` reports 27 ok.
+- Intercepted SMI (`0x62`) maps to VMX reason 6 (`OTHER_SMI`). VMX software exceptions now map type 5
+  (#BP/#OF) to SVM type 3 (APM 15.20 Table 15-11); type 6 (ICEBP) keeps the INTn skip.
+- VM creation refuses a host with `EFER.NXE` clear (APM 15.25.8), and SVM enablement reads EFER back
+  after setting SVME (APM 15.30.1 makes SVME an MBZ write while `SVMDIS` is set): a CPU that ignored
+  the write is not counted active and guest entry is refused instead of executing CLGI without SVME.
+- `mustIntercept()` keeps every MSR the AMD core does not model intercepted, so a forwarded request
+  for an Intel-only MSR cannot clear the MSRPM bits and make a Zen guest #GP. macOS 15.8.3 itself
+  rejects those indices with `HV_BAD_ARGUMENT`, so the guard is defensive for forwarded calls.
+- `AMDHV_MAX_CPUS` stays at 64: the kick IPI uses a 64-bit CPU mask, so raising the limit would
+  silently drop `hv_vcpu_interrupt` on CPU 64+. `hv_api_constants_test` pins both CPU limits.
+
+### Documentation
+- `COMPATIBILITY_CHECKLIST.md` records the post-reboot validation on this tree: 20/20 host tests,
+  clean static analysis, `hvf-smoke` PASS, `--matrix` 79/79, `--apic` 27 ok, `amd-info selftest`
+  12/12 and zero failure counters. Paths that need conditions not reproducible from userspace are
+  marked as untested rather than pending reboot.
+
 ## [0.3.2] — 2026-11-25
 
 ### Added
