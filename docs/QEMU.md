@@ -3,7 +3,7 @@
 ## Quick summary
 
 - **QEMU works.** Both Windows 10 and Windows 11 reach Windows Setup through
-  HVF/AMDHV on this host (Ryzen 5 3600, macOS, AMDHV kext 0.3.1).
+  HVF/AMDHV on this host (Ryzen 5 3600, macOS, AMDHV kext 0.3.3).
 - The one real trap: OVMF shows **"Press any key to boot from CD or DVD"** when
   booting from the ISO. If you miss it, the VM continues to the (still empty) disk
   and then to **PXE**. That is firmware/ISO behaviour, **not** an AMDHV failure.
