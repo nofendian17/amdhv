@@ -20,7 +20,8 @@ not implemented and the gap register — is in
 Version caveat: the probe records below were measured on the 2026-11-23 validation build (AMDHV
 0.2.0). The current tree is **v0.3.3** (`CHANGELOG.md`, tag `v0.3.3`; `kext/Makefile` stamps that
 tag into the built `Info.plist`, whose committed fallback is 0.3.0). The current tree's `make test`
-runs 20 host tests; the counts in the records below are from the 2026-11-23 build.
+runs 22 host tests and the kext imports 398 symbols; the older counts in the records below are from
+the 2026-11-23 validation build.
 
 ## What VZ actually calls
 
@@ -108,7 +109,7 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vm_map` / `unmap` / `protect` | yes | map/protect require 4 KiB-aligned ranges, and one map is capped at 16 GiB (`AMDHV_MAP_MAX_SIZE`); unmap accepts sub-page ranges and rounds them to page boundaries |
 | `hv_vm_sync_tsc` | yes | handed to vCPUs created later too |
 | `hv_vm_space_create` / `map_space` / `protect_space` / `unmap_space` / `space_destroy` | yes | up to 64 extra address spaces, each with its own NPT root; `space_destroy` answers `HV_BUSY` while a vCPU is bound to it |
-| `hv_vm_add_pio_notifier` / `remove` | no | stubs; VZ uses I/O exits instead |
+| `hv_vm_add_pio_notifier` / `remove` | yes | xnu `hv_io_notifier_grp_*`; a matching guest `OUT` sends an `hv_ion_message_t` and suppresses the exit; the client needs a send right on the port |
 | `hv_vm_atpic_*` / `hv_vm_ioapic_*` / `hv_vm_lapic_*` | opt-in | task trap 10 (`tIntCtl`) with `amdhv_apic=1`; see [In-kernel APIC work](#in-kernel-apic-work-phase-3-in-progress) |
 | `hv_vcpu_create` / `destroy` | yes | one vCPU per thread, up to 64 |
 | `hv_vcpu_read/write_register` | yes | through the shared page, no trap |
@@ -125,7 +126,8 @@ Two answers in that baseline are the visible symptoms of the gaps fixed in this 
 | `hv_vcpu_apic_*` | partial | thread trap 13 sub-ops 1/2/4/6/7 are decoded; get/put state are real, read/write are no-ops; requires `amdhv_apic=1` |
 | `hv_vcpu_get_exec_time` | yes | ro page offset 0, updated after every run |
 | `hv_vcpu_get_idle_time` | yes (0) | ro page offset 8; HLT is a client exit, not emulated in the kernel |
-| `hv_vcpu_exit_info` / `vmx_status` | `HV_ERROR` | ro page 0x20/0x30 are 0, i.e. "no extra information", as on Apple |
+| `hv_vcpu_exit_info` | yes (opt-in APIC) | framework reads the ro page at `+0x20`; the front end publishes `HV_VM_EXITINFO_*` on matching in-kernel APIC events and clears it every run |
+| `hv_vcpu_vmx_status` | `HV_ERROR` | ro page `+0x30` stays 0, i.e. "no extra information", as on Apple |
 | `hv_vmx_read_capability` | yes | the VMX capability words VZ/QEMU build their controls from |
 | `hv_vmx_vcpu_read/write_vmcs` | yes | the VMCS shadow in `VmcsState.hpp` |
 | `hv_vcpu_set_tsc_relative` | yes | applied on the next run as `commpage(adjust - base) + relative` (`TscOffset.hpp`) |
@@ -247,10 +249,11 @@ Three `ok` answers need a careful reading before they become a compatibility cla
 
 `hv_capability` reports `VCPUMAX=64`, matching `AMDHV_MAX_VCPUS_PER_VM`; `hv_tsc_clock` returns a
 monotonic value; `hv_vmx_get_msr_info` answers 0 for the Intel-only `IA32_ARCH_CAPABILITIES` info
-field. The five `hv_vcpu_exit_*` helpers and `hv_vcpu_vmx_status`/`hv_vcpu_exit_info` answer
-`HV_ERROR` / `HV_UNSUPPORTED` because they only have meaning with the in-kernel APIC, which is
-opt-in (`amdhv_apic=1`). The five `hv_vcpu_exit_*` helpers need an `HV_VM_EXITINFO_*` code from
-`hv_vcpu_exit_info()`, which the core never publishes.
+field. `hv_vcpu_vmx_status` answers `HV_ERROR` because ro page `+0x30` stays 0, as on Apple. The
+exit-info helpers are framework decoders of a payload at ro `+0x20/0x28/0x48/0x49/0x4c/0x50`;
+without a matching in-kernel APIC event all six answer `HV_ERROR`. With `amdhv_apic=1`,
+`hvf-probe --exitinfo-mmio` verifies `exit_info`, `hv_vcpu_exit_apic_access_read` and
+`hv_vcpu_exit_ioapic_eoi`; INIT/SIPI and #GP publication is wired but has no live probe.
 
 ## Capability words follow the implementation
 
@@ -350,9 +353,10 @@ A trap-log capture decoded task trap 10's op codes (`0x6a`–`0x7a` for LAPIC/IO
 frequency) and task 11's `(data << 32) | addr` MSI argument. Task traps 10/11 are now wired to the
 register model, and thread trap 13 accepts the ten per-vCPU sub-ops as no-ops after decoding their
 block codes. On the installed kext, `--apic` shows **27 `ok`** answers out of 32 calls; the five
-`hv_vcpu_exit_*` helpers still answer `HV_ERROR` because AMDHV never publishes the
-`HV_VM_EXITINFO_*` codes those helpers decode. IOAPIC get/put state
-used the wrong word of the arg block; the fix is live-verified (both calls answer `ok`).
+`hv_vcpu_exit_*` helpers answer `HV_ERROR` without an exit-info event. The front end now publishes
+`HV_VM_EXITINFO_*` in the ro page, and `--exitinfo-mmio` live-verifies `exit_info`,
+`apic_access_read` and `ioapic_eoi`; INIT/SIPI/#GP publication remains unprobed. IOAPIC get/put
+state used the wrong word of the arg block; the fix is live-verified (both calls answer `ok`).
 
 The guest path is now live-verified with `hvf-probe --apic-run`: a real-mode guest with an IVT entry
 for vector `0x30` and an IOAPIC redirect from IRQ0 exits with RIP `0x1200` (the handler), not the
@@ -360,8 +364,9 @@ entry HLT at `0x1000`. The trap log shows `pending=48` for that run. The fix tha
 the `hv_ioapic_state_ext_t` layout: state starts at offset `+8`, not `+4`; the 4-byte shift made the
 mask bit appear set. `offsetof` on the macOS 15 SDK gives `ioapic=8`, `apic=8`, `atpic=4`.
 
-Only the five `hv_vcpu_exit_*` helpers still answer `HV_ERROR`; they never reach a trap because the
-core publishes no `HV_VM_EXITINFO_*` code for them to decode. LAPIC `get_state`/`put_state` use the SDK layout (state at
+The exit helpers never reach a trap: the framework decodes the `HV_VM_EXITINFO_*` payload written
+into the ro page. With no event all six answer `HV_ERROR`; `exit_info`, `apic_access_read` and
+`ioapic_eoi` are live-verified via `hvf-probe --exitinfo-mmio`. LAPIC `get_state`/`put_state` use the SDK layout (state at
 `+8`) and are real; `hv_vcpu_apic_read`/`write` are accepted as no-ops because their private
 argument encoding does not expose the offset/value as plain client-memory words. An earlier
 get_state version caused an SMAP panic by copying straight to a user pointer; the current code uses
