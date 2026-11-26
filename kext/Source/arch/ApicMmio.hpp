@@ -43,10 +43,13 @@ inline MmioOp decodeMmio(const uint8_t *code, size_t n)
     if (n < 6)
         return op;
     size_t i = 0;
-    if (code[i] == 0x66) {                    /* operand-size prefix: real-mode guests need it for EAX */
-        if (n < 7)
-            return op;
-        i++;
+    /* 0x66 selects a 32-bit operand, 0x67 a 32-bit address. A real-mode guest needs both for an
+     * absolute MOV to an APIC page above 1 MiB; either prefix may come first. */
+    for (unsigned seen = 0; seen < 2; seen++) {
+        if (code[i] == 0x66 || code[i] == 0x67)
+            i++;
+        else
+            break;
     }
     if (n < i + 6)
         return op;

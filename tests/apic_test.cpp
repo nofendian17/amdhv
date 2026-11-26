@@ -151,6 +151,83 @@ void testLayouts()
     CHECK(sizeof(amdhv::apic::AtpicState) == 16);
 }
 
+/* Wire formats captured from Apple's framework trap log (task trap 10).
+ * hv_vm_lapic_set_intr(0, 0x41, edge)    -> a=0x7f4100000000, b low byte 0
+ * hv_vm_lapic_set_intr(1, 0x44, level)   -> a=0x7f4400000001, b low byte 2
+ * hv_vm_send_ioapic_intr(0x30)           -> a=0x30, b is an opaque cookie
+ * IOAPIC redirection entry: vector 7:0, mask bit 16, destination 63:56. */
+void testApicWireDecode()
+{
+    amdhv::apic::LapicIntrWire lapic = amdhv::apic::decodeLapicIntr(0x7f4100000000ull, 0x91f483e00000002ull);
+    CHECK(lapic.vcpu == 0);
+    CHECK(lapic.vector == 0x41);
+    CHECK(lapic.trigger == 2);
+
+    lapic = amdhv::apic::decodeLapicIntr(0x7f4400000001ull, 0x3f6a511900000000ull);
+    CHECK(lapic.vcpu == 1);
+    CHECK(lapic.vector == 0x44);
+    CHECK(lapic.trigger == 0);
+
+    amdhv::apic::IoapicIntrWire io = amdhv::apic::decodeIoapicIntr(0x30ull);
+    CHECK(io.vector == 0x30);
+    CHECK(io.destination == 0);
+    CHECK(!io.masked);
+    CHECK(io.valid);
+
+    io = amdhv::apic::decodeIoapicIntr(0x02000000000000f0ull);  /* dest 2, vector 0xf0 */
+    CHECK(io.vector == 0xf0);
+    CHECK(io.destination == 2);
+    CHECK(!io.masked);
+
+    io = amdhv::apic::decodeIoapicIntr(0x0000000000010021ull);  /* masked redirection entry */
+    CHECK(io.vector == 0x21);
+    CHECK(io.masked);
+    CHECK(!io.valid);
+
+    io = amdhv::apic::decodeIoapicIntr(0xff00000000000060ull);  /* broadcast destination */
+    CHECK(io.destination == 0xff);
+    CHECK(io.valid);
+
+    io = amdhv::apic::decodeIoapicIntr(0x0full);                 /* vector below the APIC's valid range */
+    CHECK(io.vector == 0x0f);
+    CHECK(!io.valid);
+}
+
+/* hv_vm_lapic_msi hands the trap (data << 32) | addr. Captured wire values:
+ * addr 0xfee00000, data 0x41 -> arg 0x41fee00000 (physical destination 0)
+ * addr 0xfee01000, data 0x50 -> arg 0x50fee01000 (physical destination 1)
+ * MSI address: 31:20 0xfee, 19:12 destination, bit 3 redirection hint, bit 2 logical mode.
+ * MSI data: 7:0 vector. */
+void testApicMsiDecode()
+{
+    amdhv::apic::LapicMsiWire m = amdhv::apic::decodeLapicMsi(0xFEE00000ull, 0x41ull);
+    CHECK(m.valid);
+    CHECK(m.vector == 0x41);
+    CHECK(m.destination == 0);
+    CHECK(!m.logical);
+    CHECK(!m.redirect);
+
+    m = amdhv::apic::decodeLapicMsi(0xFEE01000ull, 0x50ull);
+    CHECK(m.valid);
+    CHECK(m.vector == 0x50);
+    CHECK(m.destination == 1);
+
+    m = amdhv::apic::decodeLapicMsi(0xFEE00008ull, 0x60ull);     /* redirection hint (bit 3) */
+    CHECK(m.valid);
+    CHECK(m.redirect);
+    CHECK(!m.logical);
+
+    m = amdhv::apic::decodeLapicMsi(0xFEE00004ull, 0x61ull);     /* logical destination mode (bit 2) */
+    CHECK(m.valid);
+    CHECK(m.logical);
+
+    m = amdhv::apic::decodeLapicMsi(0xFEC00000ull, 0x62ull);     /* IOAPIC address, not an MSI */
+    CHECK(!m.valid);
+
+    m = amdhv::apic::decodeLapicMsi(0xFEE00000ull, 0x0full);     /* vector below the APIC's valid range */
+    CHECK(!m.valid);
+}
+
 } // namespace
 
 int main()
@@ -161,6 +238,8 @@ int main()
     testAtpic();
     testLapicRegisters();
     testLayouts();
+    testApicWireDecode();
+    testApicMsiDecode();
     if (fails) {
         printf("apic_test: %d failure(s)\n", fails);
         return 1;

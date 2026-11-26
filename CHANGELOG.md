@@ -5,6 +5,36 @@ semantic versioning. The `v*` git tag is the release version: `kext/Makefile` st
 built `Info.plist`. The value committed in `kext/Info.plist` is only a fallback for source archives
 made with `git archive`, which have no tag metadata.
 
+## [0.4.0] — 2026-11-26
+
+### Added
+- `hv_vm_lapic_set_intr`, `hv_vm_send_ioapic_intr` and `hv_vm_lapic_msi` now really deliver interrupts
+  to guest LAPICs. Their framework wire formats are decoded in `ApicState.hpp` and covered by host
+  tests; `--apic-inject` drives all three to real guest handlers on hardware.
+- `hv_vm_add_pio_notifier` / `hv_vm_remove_pio_notifier` are implemented with xnu's own
+  `hv_io_notifier_grp_*` API instead of returning `HV_UNSUPPORTED`. A matching guest `OUT` sends an
+  `hv_ion_message_t` and is suppressed. The client must hold a **send right** on the Mach port.
+- The vCPU read-only page now publishes `HV_VM_EXITINFO_*` when the in-kernel APIC handles a
+  matching event. `hv_vcpu_exit_info`, `hv_vcpu_exit_apic_access_read` and
+  `hv_vcpu_exit_ioapic_eoi` are live-verified via `hvf-probe --exitinfo-mmio`. With no event all six
+  exit helpers still answer `HV_ERROR`, as on Apple.
+
+### Changed
+- Task trap slots 8/9 are real PIO-notifier handlers, so the provider has 28 real trap handlers and
+  four logging stubs. The kext imports 398 kernel symbols; `make test` runs 22 host tests.
+- Compatibility records now distinguish "probed/answered" from "implemented", and report the
+  loaded kext identity and the still-unprobed INIT/SIPI/#GP exit-info paths honestly.
+
+### Fixed
+- The two task-trap-10 opcodes were reversed: `0x6a` was a no-op and `0x73` read the vector from an
+  opaque framework cookie. MSI was a separate no-op. IRR delivery now targets the decoded vCPU, with
+  `0xff`/redirection hint reaching all vCPUs.
+- Real-mode APIC MMIO was mis-decoded: `decodeMmio()` now accepts both `0x66` and `0x67` prefixes
+  with an 8-byte instruction fetch, and `guestBytes()` adds the intra-page offset that the 4 KiB
+  NPT lookup masks away.
+- Nested-page-fault instruction length now comes from VMCB `0xD0`; AMD APM §15.7.1 makes `nRIP` zero
+  for NPF, so the old length was reported as 0.
+
 ## [0.3.3] — 2026-11-26
 
 ### Fixed

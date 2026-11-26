@@ -13,7 +13,7 @@ actually implemented, where an API is answered, and what is deliberately not sup
 | xnu provider ABI | **Yes** | `hv_set_traps`, `hv_set_callbacks`, task/thread targets and `hv_suspend`/`hv_resume` match `xnu-11417.140.69` and `xnu-12377.121.6`. |
 | AMD SVM core on Ryzen | **Yes (subset)** | VMRUN/VMSAVE/VMLOAD, intercepts, NPT 4 KiB, ASID/TLB, clean bits, event injection, TSC and FPU state are real. Full AMD APM Ch.15 is **not** implemented. |
 | Hypervisor.framework API used by real clients | **Yes** | VZ, QEMU HVF, VirtualBox and the Android emulator use the implemented subset. |
-| Whole public Hypervisor.framework surface | **Partial** | 79 functions are probed and answered; not all are real. PIO notifier is a stub, APIC is opt-in, five exit helpers return `HV_ERROR`. |
+| Whole public Hypervisor.framework surface | **Partial** | 79 functions are probed and answered; not all are real. APIC is opt-in; PIO notifier and the exit-info page are real. Of the six exit-info helpers, `exit_info`, `apic_access_read` and `ioapic_eoi` are live-verified; INIT/SIPI/#GP publication is wired but has no live probe. |
 | Whole AMD APM Vol.2 Ch.15 / App.B | **No** | AVIC, SEV, NMI virtualization, SMM, nested virtualization, TSC scaling, large NPT leaves, etc. are absent. |
 
 ### Status meanings
@@ -32,11 +32,11 @@ actually implemented, where an API is answered, and what is deliberately not sup
 | Item | Value |
 | --- | --- |
 | Validation host | AMD Ryzen 5 3600, 12 logical CPUs, macOS 15.8.3 (24H241) |
-| Validation build | AMDHV 0.2.0, 2026-11-23 run; current runtime checks 2026-11-25 ran against the **loaded 0.3.1 kext** |
+| Validation build | AMDHV 0.2.0, 2026-11-23 run; current runtime checks 2026-11-26 ran against the **loaded 0.3.3 kext** (UUID `642B927D`) |
 | Current tree | **v0.3.3** (`CHANGELOG.md`, tag `v0.3.3`; `Info.plist` fallback 0.3.0, stamped from tag at build time) |
-| Host tests | `make test` → **20/20** (`hv_api_constants_test`, `hv_kext_abi_test` added by the API/ABI hardening) |
-| Kext build | `make kext tools` → 393 imported symbols resolve; no ABI change |
-| Historical figures | `18 tests` / `18/18` in the records below belong to the 0.2.0 validation build |
+| Host tests | `make test` → **22/22** (the API/ABI hardening added `hv_api_constants_test`/`hv_kext_abi_test`; PIO notifier added `ion_test`, exit-info added `exitinfo_test`) |
+| Kext build | `make kext tools` → **398** imported symbols resolve (was 393; +5 xnu `hv_io_notifier_grp_*`); no ABI change |
+| Historical figures | `18 tests` / `18/18` (0.2.0), `20/20` and `21/21` in the records below belong to earlier builds |
 
 `79 of 79` in `hvf-probe --matrix` means **all 79 calls were probed and answered**, not that all 79
 are fully implemented. The tables below make that distinction.
@@ -54,7 +54,8 @@ whole framework as documented today, and this page does not cover those calls.
 
 The macOS 15.x x86 SDK exports **78 `hv_return_t` functions + `hv_tsc_clock`**. They do not map 1:1
 to the 32 trap slots: registers, MSRs, VMCS fields and FP state live in shared pages, so many calls
-need no trap at all. Trap slots: **26 real handlers**, **6 logging stubs**.
+need no trap at all. Trap slots: **28 real handlers**, **4 logging stubs** (task/thread 14/15 only;
+task 8/9 became real PIO-notifier handlers).
 
 "Answered by" values: **Framework** = userspace/shared page; **Shared page** = framework writes a
 field the kext reads on the next VMRUN; **Trap** = xnu dispatches to `Frontend.cpp`; **Stub** = logged
@@ -130,13 +131,14 @@ Default VM: all APIC calls answer `HV_UNSUPPORTED`. With boot-arg `amdhv_apic=1`
 validation host), `hv_vm_create(HV_VM_ACCEL_APIC)` is accepted. On the **post-reboot validation build of this tree**,
 `hvf-probe --apic` reports **27 ok, 5 `HV_ERROR`** out of 32 APIC calls: the low-byte tag fix makes
 `hv_vcpu_apic_get_state`/`put_state` work on macOS 15.8.3, where the state pointer's low byte used
-to make the old 16-bit match see `0x9003`/`0x9004` instead of `0x0003`/`0x0004`. The five
-`hv_vcpu_exit_*` helpers still return `HV_ERROR`.
+to make the old 16-bit match see `0x9003`/`0x9004` instead of `0x0003`/`0x0004`. With no APIC
+event all six exit-info helpers answer `HV_ERROR`, as on Apple; with a real IOAPIC MMIO event
+`--exitinfo-mmio` verifies `exit_info` + `apic_access_read` + `ioapic_eoi` (see the note below).
 
 | API | Status (default → opt-in) | Answered by | What AMDHV does |
 | --- | --- | --- | --- |
-| `hv_vm_lapic_set_intr` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Sets guest LAPIC IRR; delivered by VM-entry event injection. |
-| `hv_vm_lapic_msi` | `HV_UNSUPPORTED` → **No-op** | Trap 11 | Success; MSI routing into the guest is not emulated. |
+| `hv_vm_lapic_set_intr` | `HV_UNSUPPORTED` → **Yes (verified 2026-11-26)** | Trap 10 `0x6a` | Decodes `vcpu` (arg word `a` low half), `vector` (`a` bits 32..39) and trigger (`b` low byte) from the framework's wire format; sets that vCPU's LAPIC IRR. The LAPIC arbiter (AMD APM Vol.2 ch.16) feeds VM-entry event injection; `--apic-inject` reaches the `0x30` handler. |
+| `hv_vm_lapic_msi` | `HV_UNSUPPORTED` → **Yes (verified 2026-11-26)** | Trap 11 | Decodes `arg = (data << 32) | addr` as an MSI message (address `31:20 = 0xfee`, destination `19:12`, redirection hint bit 3, logical-mode bit 2; data `7:0` = vector) and sets IRR on the addressed LAPIC(s). Redirection hint or destination `0xff` reaches all vCPUs; logical mode uses the flat `LDR` bitmap (cluster DFR not emulated). `--apic-inject` reaches the `0x60` handler. |
 | `hv_vm_ioapic_assert_irq` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Real IOAPIC model (`ApicState.hpp`). |
 | `hv_vm_ioapic_deassert_irq` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Real IOAPIC model. |
 | `hv_vm_ioapic_pulse_irq` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Assert + deassert. |
@@ -144,7 +146,7 @@ to make the old 16-bit match see `0x9003`/`0x9004` instead of `0x0003`/`0x0004`.
 | `hv_vm_ioapic_write` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Writes IOAPIC register. |
 | `hv_vm_ioapic_get_state` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | SDK ext layout, state at `+8` (fixed from `+4`). |
 | `hv_vm_ioapic_put_state` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | SDK ext layout, state at `+8`. |
-| `hv_vm_send_ioapic_intr` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Feeds the IOAPIC redirect path. |
+| `hv_vm_send_ioapic_intr` | `HV_UNSUPPORTED` → **Yes (verified 2026-11-26)** | Trap 10 `0x73` | Decodes the IOAPIC redirection table entry Apple passes in arg word `a`: vector `7:0`, mask bit `16`, destination `63:56`. Unmasked entries set IRR on the addressed LAPIC (`0xff` = all vCPUs); `--apic-inject` reaches the `0x50` handler. |
 | `hv_vm_atpic_assert_irq` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Real 8259A model. |
 | `hv_vm_atpic_deassert_irq` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Real 8259A model. |
 | `hv_vm_atpic_port_read` | `HV_UNSUPPORTED` → **Yes** | Trap 10 | Reads PIC port/mask. |
@@ -157,28 +159,35 @@ to make the old 16-bit match see `0x9003`/`0x9004` instead of `0x0003`/`0x0004`.
 | `hv_vcpu_apic_write` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Private encoding not decoded; no side effect. |
 | `hv_vcpu_apic_get_state` | `HV_UNSUPPORTED` → **Yes (0.3.3)** | Thread trap 13 | Real LAPIC state, SDK layout, `copyout` from a kernel buffer; verified after the 2026-11-26 reboot. |
 | `hv_vcpu_apic_put_state` | `HV_UNSUPPORTED` → **Yes (0.3.3)** | Thread trap 13 | Real LAPIC state, `copyin` into a kernel buffer; same tag fix, verified after the reboot. |
-| `hv_vcpu_exit_info` | **No** | Framework | Read-only page is zero: no `HV_VM_EXITINFO_*` code is published. |
-| `hv_vcpu_exit_init_ap` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_INIT_AP`; never produced. |
-| `hv_vcpu_exit_startup_ap` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_STARTUP_AP`; never produced. |
-| `hv_vcpu_exit_ioapic_eoi` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_IOAPIC_EOI`; never produced. |
-| `hv_vcpu_exit_apic_access_read` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_APIC_ACCESS_READ`; never produced. |
-| `hv_vcpu_exit_inject_excp` | **No** (`HV_ERROR`) | Framework | Needs `HV_VM_EXITINFO_INJECT_EXCP`; never produced. |
+| `hv_vcpu_exit_info` | **Yes (framework page)** | Framework | Reads `HV_VM_EXITINFO_*` from ro page `+0x20`; the front end clears it every run and publishes it when the in-kernel APIC handles a matching event. |
+| `hv_vcpu_exit_init_ap` | **Wired, live event pending** | Framework | ICR INIT write publishes code 2 and the target bitmap at `+0x28`. |
+| `hv_vcpu_exit_startup_ap` | **Wired, live event pending** | Framework | ICR SIPI write publishes code 3, bitmap and RIP at `+0x50`. |
+| `hv_vcpu_exit_ioapic_eoi` | **Yes (verified 2026-11-26)** | Framework | IOAPIC EOI write publishes code 4 and the vector at `+0x48`; `hvf-probe --exitinfo-mmio` returns `vec=0x30`. |
+| `hv_vcpu_exit_apic_access_read` | **Yes (verified 2026-11-26)** | Framework | In-kernel IOAPIC MMIO read publishes code 7 and the value at `+0x48`; `--exitinfo-mmio` returns `0x10100`. |
+| `hv_vcpu_exit_inject_excp` | **Wired, live event pending** | Framework | Illegal APIC access publishes code 5, #GP vector, `valid` at `+0x49` and error code at `+0x4c`. |
 | `hv_vcpu_apic_lsc_enter_r32` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Decoded and accepted; no deeper effect. |
 | `hv_vcpu_apic_lsc_enter_imm32` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Decoded and accepted; no deeper effect. |
 | `hv_vcpu_apic_lsc_invalidate` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Decoded and accepted; no deeper effect. |
 | `hv_vcpu_apic_ctrl` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Decoded and accepted; no deeper effect. |
 | `hv_vcpu_apic_trigger_lvt` | `HV_UNSUPPORTED` → **No-op** | Thread trap 13 | Decoded and accepted; no deeper effect. |
 
-Note: the five exit helpers are **not** merely "rejected by userspace". The root cause is that the
-core never publishes `HV_VM_EXITINFO_INIT_AP`, `...STARTUP_AP`, `...IOAPIC_EOI`,
-`...APIC_ACCESS_READ` or `...INJECT_EXCP`; the framework helpers therefore have no exit payload.
+Note: the five exit helpers are **not** traps — the framework decodes a payload the provider writes
+into the vCPU's read-only page. The wire layout was recovered with `hvf-probe --exitinfo` (code at
+`+0x20`, target bitmap `+0x28`, value/vector `+0x48`, `valid` `+0x49`, error code `+0x4c`, startup
+RIP `+0x50`). `amdhv_exitinfo_encode()` in `AMDHVShared.h` has host tests in `exitinfo_test.cpp`.
+With no APIC event all six helpers still answer `HV_ERROR`, as on Apple. `hvf-probe --exitinfo-mmio`
+drives a real guest MOV through the IOAPIC window (CS/DS limit raised to 4 GiB, `66 67 89 05` /
+`66 67 8B 05` encodings) and verifies codes 7 and 4 end-to-end. INIT/SIPI and #GP publication is
+wired but has no live probe yet. Two bugs found on the way: `decodeMmio()` now accepts `0x67` (32-bit
+address prefix) with an 8-byte fetch buffer, and `VmShared::guestBytes()` adds the intra-page offset
+that `Npt::lookup()` strips.
 
 ### 1.6 PIO notifier (2)
 
 | API | Status | Answered by | What AMDHV does |
 | --- | --- | --- | --- |
-| `hv_vm_add_pio_notifier` | **No** | Stub (task 8) | Logged, returns `HV_UNSUPPORTED` (`0xfae9400f`) in normal mode; mode 2 returns success for debugging. VZ uses I/O exits instead. |
-| `hv_vm_remove_pio_notifier` | **No** | Stub (task 9) | Same stub behaviour. |
+| `hv_vm_add_pio_notifier` | **Yes (verified 2026-11-26)** | Task 8 | Decodes the five-word block (addr/size/value/port name/flags) and forwards it to xnu's `hv_io_notifier_grp_add()` on the VM's group. A matching guest `OUT` sends an `hv_ion_message_t` and the exit is suppressed. The client must hold a **send right** on the port. |
+| `hv_vm_remove_pio_notifier` | **Yes (verified 2026-11-26)** | Task 9 | Same block forwarded to `hv_io_notifier_grp_remove()`; a missing entry answers `HV_ERROR`. |
 
 ### 1.7 Notes for API developers
 
@@ -225,7 +234,7 @@ core never publishes `HV_VM_EXITINFO_INIT_AP`, `...STARTUP_AP`, `...IOAPIC_EOI`,
 | Event injection / re-injection | **Yes** | `eventInj` + `eventInjErr`; external interrupt and NMI exits re-injected. VMX type 5 (#BP/#OF) now maps to SVM type 3 (INT3/INTO trap, APM §15.20), type 6 (ICEBP) keeps the INTn skip; `nextRip` is set for software-generated events. |
 | ASID + TLB | **Yes** | One ASID per vCPU; `TLB_FLUSH_BY_ASID` only when translations can be stale; `TLB_FLUSH_ALL` fallback. |
 | Nested paging | **Yes (4 KiB only)** | 4-level walk, `US`/`NX`, permissions AND across levels. |
-| NPF exit info | **Yes** | GPA only used when DecodeAssists `EXITINFO1[32]` says `EXITINFO2` is valid. APM §15.25.7: bit 32 = final GPA translation, bit 33 = guest page-table walk; `VmxMap.hpp` sets VMX qual bits 7/8 accordingly. APM Table 15-3 confirms MOV DRx has no bit-63 validity flag — reading GPR from bits 3:0 without checking it is correct. |
+| NPF exit info | **Yes** | GPA only used when DecodeAssists `EXITINFO1[32]` says `EXITINFO2` is valid. APM §15.25.7: bit 32 = final GPA translation, bit 33 = guest page-table walk; `VmxMap.hpp` sets VMX qual bits 7/8 accordingly. Instruction length comes from VMCB `0xD0` (APM §15.8.4) because `nRIP` is zero for NPF (§15.7.1). APM Table 15-3 confirms MOV DRx has no bit-63 validity flag — reading GPR from bits 3:0 without checking it is correct. |
 | Guest state save/restore | **Yes** | `VMSAVE host → VMLOAD guest → VMRUN → VMSAVE guest → VMLOAD host`. |
 | Guest EFER, PAT, DR6/DR7, DR0–DR3, `TSC_AUX` | **Yes** | DR0–DR3 manually saved/restored around VMRUN (`VmRun.cpp`); `TSC_AUX` swapped because VMRUN does not. |
 | x87/SSE/AVX + XCR0 | **Yes** | XSAVE areas swapped by hand; PKU bits masked on CPUID leaf 7 because macOS never enables PKRU. |
@@ -279,6 +288,7 @@ Single-host observations, not a support promise. See `docs/CLIENTS.md`.
 | --- | --- | --- | --- |
 | P0 | `waitForSystemMapper` at boot | **Done** | All physical allocations pass `kIOMemoryMapperNone`. |
 | P0 | APIC get/put-state tag | **Done** | Decode the tag from the low byte of word 0. Host test covers the observed `0x9004` encoding; `hvf-probe --apic` answers `ok` for both calls on the post-reboot validation build. |
+| P0 | Direct LAPIC injection (`0x6a`/`0x73`, MSI trap 11) | **Done, verified 2026-11-26** | The two task-trap-10 opcodes were reversed: `0x6a` was a no-op and `0x73` read the vector from an opaque framework cookie; MSI was a separate no-op. Decoders live in `ApicState.hpp` with host tests in `apic_test.cpp` (a mutation of the destination shift fails the test); the new LAPIC APIC ID is the vCPU id so IOAPIC/MSI destinations route correctly. `hvf-probe --apic-inject` went from `MISSED` on the old kext (UUID `E359D76F`) to all three handlers reached on the installed build (UUID `A5468CB4`). A separate two-vCPU probe confirmed `lapic_set_intr(1, 0x30)` and MSI with physical destination 1 set IRR only on vCPU 1, while `send_ioapic_intr(0xff…)` and MSI with the redirection hint set it on both. Logical MSI mode uses the flat `LDR` bitmap; DFR cluster mode is not emulated. |
 | P0 | EFER.SVME readback after WRMSR | **Partly verified on 0.3.3** | `enableAction()` and `ensureThisCpu()` read EFER back; a CPU that ignored SVME (APM §15.30.1 MBZ while `SVMDIS=1`) is not counted active and guest entry returns `kIOReturnNotReady`. A post-reboot `amd-info selftest` confirmed SVME and `VM_HSAVE_PA` on 12/12 CPUs (`enableFailures = 0`), but a CPU silently ignoring the SVME write cannot be forced on this host. |
 | P0 | `setSpace` / `spaceDestroy` race | **Partly verified on 0.3.3** | `setSpace()` now holds `fRw` read across the root lookup and the `fSpace`/`nestedCr3` bind, so `spaceDestroy()` (write lock) can no longer free the NPT root between them. A post-reboot probe confirmed `HV_BUSY` while bound and success after unbind; the concurrent race itself was not forced. |
 | P0 | `tVmDestroy` double-free / traps on a dying VM | **Partly verified on 0.3.3** | Destroy is claimed under `vm->lock` (second destroy gets `HV_BUSY`); `tVmSyncTsc` and `tVcpuInterrupt` now `vmPin()`/`vmUnpin()` like the other per-VM traps. A post-reboot probe confirmed destroy with a live vCPU is refused (`HV_ERROR`) and a second destroy is refused; the concurrent trap/destroy interleaving was not forced. |
@@ -295,7 +305,7 @@ Single-host observations, not a support promise. See `docs/CLIENTS.md`.
 | P2 | In-kernel APIC MMIO decode | **Loaded 0.3.3, path untested** | When guest CR0.PG is set, the in-kernel APIC MMIO shortcut is skipped and the NPF goes to the userspace VMM, because guest linear RIP is not a guest physical address. |
 | P2 | Latent `find()` UAF | **Open (no callers)** | The VM registry does not own a reference, so `find()` can retain an object whose refcount already reached zero. No current caller; fix by giving the registry its own reference. |
 | P1 | Intel-only MSRs enabled native | **Verified on 0.3.3** | `mustIntercept()` keeps every MSR the AMD core does not model intercepted (`K_UNKNOWN`), covering `0xDA0`, `0xDC0..0xDDF`, `0x680..0x6DF`, so a forwarded request cannot clear the MSRPM bits and make a Zen guest #GP. `msr_map_test` covers the rule. On this macOS 15.8.3 SDK the framework itself rejects those indices with `HV_BAD_ARGUMENT` before the trap, so the guard is defensive for the calls that do reach the kext. |
-| P2 | Untranslated SVM exits | **Partly fixed** | SMI `0x62` now maps to VMX reason 6 (`OTHER_SMI`), no longer `AMDHV_EXIT_UNHANDLED`; `vmx_map_test` covers it. Other untranslated intercepts still fall back to UNHANDLED with RIP unchanged. NPF reports `instrLen = 0`, which relies on the client re-decoding (QEMU does). |
+| P2 | Untranslated SVM exits | **Partly fixed** | SMI `0x62` now maps to VMX reason 6 (`OTHER_SMI`), no longer `AMDHV_EXIT_UNHANDLED`; `vmx_map_test` covers it. Other untranslated intercepts still fall back to UNHANDLED with RIP unchanged. NPF no longer reports `instrLen = 0`: APM §15.7.1 makes `nRIP` zero for NPF, so the length now comes from VMCB `0xD0` (APM §15.8.4); `vmx_map_test` and `vmcs_state_test` cover it. |
 | P2 | Software-exception injection type | **Loaded 0.3.3, path untested** | Per APM §15.20 Table 15-11, VMX type 5 (#BP/#OF) maps to SVM type 3 (INT3/INTO trap + DPL check) with a `nextRIP` skip; type 6 (ICEBP, no SVM equivalent) keeps the INTn skip. `vmcs_state_test` covers both encodings. |
 | P2 | NPT reach on Zen 4/5 | **Partial** | 48-bit GPA ceiling remains: a 4-level NPT cannot index a GPA above 2^48 (fixing it needs a 5-level NPT, not a constant change). Host `EFER.NXE` is now checked at VM creation (APM §15.25.8) and a VM is refused if execute permissions could not be enforced. |
 | P0 | Guest `WRMSR 10h` cannot move host TSC | **Done** | MSRPM intercept kept; access emulated against `tscOffset`. |
@@ -305,15 +315,15 @@ Single-host observations, not a support promise. See `docs/CLIENTS.md`.
 | P1 | PAUSE filter threshold | **Done** | 3000 / 128, CPUID-gated. |
 | P1 | 2 MiB NPT leaves | **Deferred** | Needs physically contiguous 2 MiB windows; anonymous user memory rarely provides them. |
 | P2 | `hv_vm_space_*` family | **Done** | 64 spaces, real NPT roots, `HV_BUSY` while bound. |
-| P2 | PIO notifier | **Open** | Needs notifier registry + mach-port notification; VZ does not use it. |
+| P2 | PIO notifier | **Done, verified 2026-11-26** | Each VM owns an xnu `hv_ion_grp_t` (freed with the VM); task traps 8/9 add/remove entries, and an `OUT` exit matching an entry fires `hv_io_notifier_grp_fire()` and steps over the instruction. `hvf-probe --pio-notifier` receives `addr=0x3f8 size=1 value=0x42` and ends at the following HLT. VZ still uses I/O exits; only an IN still goes to the client. |
 | P2 | Full APIC semantics | **Open** | `inject_extint` and most sub-ops still no-ops; opt-in only. |
 | P2 | `hv_vcpu_flush` | **Closed by design** | Apple deprecated it; use `hv_vcpu_invalidate_tlb`. |
 | P3 | AVIC, VGIF, LBRV, SVML, TSC scaling, large NPT leaves | **Open** | Would change the model; not reachable from current clients. |
 
-The fixes in this release were installed and loaded after the 2026-11-26 reboot (the binary was
-stamped 0.3.2 because the v0.3.3 tag did not exist yet). Rows
-marked "Loaded 0.3.3, path untested" contain fixes that are present in the running kext but whose
-specific code path has not been exercised on hardware.
+The current kext was installed and loaded after the 2026-11-26 reboots and is stamped 0.3.3
+(UUID `642B927D`); older recorded builds stamped 0.3.2 predate the `v0.3.3` tag. Rows marked
+"Loaded 0.3.3, path untested" contain fixes that are present in the running kext but whose specific
+code path has not been exercised on hardware.
 
 Acceptance for any change: host test + `hvf-probe` (if API surface changes) + one client run +
 `amd-info stats` with `vmInvalidExits = 0` and `assertFailures = 0`.
@@ -324,12 +334,16 @@ Acceptance for any change: host test + `hvf-probe` (if API surface changes) + on
 
 | Command | Purpose |
 | --- | --- |
-| `make test` | 20 host tests; runs anywhere. |
+| `make test` | 22 host tests; runs anywhere. |
 | `make kext tools` | builds `AMDHV.kext`, `amd-info`, `hvf-smoke`, `hvf-probe`. |
 | `sudo build/amd-info selftest` | verifies `EFER.SVME` / `VM_HSAVE_PA` on every CPU. |
 | `sudo build/amd-info stats` | `enableFailures`, `vmInvalidExits`, `assertFailures`, `vmFpuMismatches` must stay 0. |
 | `./build/hvf-smoke` | end-to-end public-API VMM. |
 | `./build/hvf-probe --matrix` | all 79 x86 API answers; compare with `docs/CAPABILITIES.md`. |
+| `./build/hvf-probe --apic-inject` | guest reaches `0x1200` via `hv_vm_lapic_set_intr`, `0x1250` via `hv_vm_send_ioapic_intr`, and `0x1260` via `hv_vm_lapic_msi`; all three must say `handler reached`. |
+| `./build/hvf-probe --pio-notifier` | add/remove return `ok`, the guest's `OUT` is suppressed (`RIP 0x1006`), and the Mach message carries `addr=3f8 size=1 value=42`. |
+| `./build/hvf-probe --exitinfo` | with no APIC event all six exit helpers answer `HV_ERROR`, as on Apple. |
+| `./build/hvf-probe --exitinfo-mmio` | a real guest IOAPIC MMIO read publishes code 7 (`value=0x10100`) and an EOI write publishes code 4 (`vec=0x30`); both helpers must return `ok`. |
 | `sysctl kern.hv_support` | must print 1 after registration. |
 
 A kext change needs a reboot; the running kext cannot be replaced in place.
@@ -339,6 +353,10 @@ A kext change needs a reboot; the running kext cannot be replaced in place.
 | Post-reboot 2026-11-22 | `hvf-smoke` PASS, `hvf-probe` matches matrix | no `waitForSystemMapper` warning; counters clean. |
 | Current tree 2026-11-25 (loaded kext 0.3.1) | `make test` 20/20, `make kext tools` OK (393 symbols), `amd-info selftest` 12/12, `hvf-smoke` PASS, `hvf-probe --matrix` 79/79, all failure counters 0 | `amdhv_apic=1` is set; `--apic` 25 ok / 2 unsupported / 5 error. The 0.3.2 kext with the APIC tag fix is built but not loaded yet. |
 | Reboot 2026-11-26 (validation build of this tree, stamped 0.3.2) | `sysctl kern.hv_support=1`, SVM active on 12/12 CPUs, `hvf-smoke` PASS, `hvf-probe --matrix` 79/79, `--apic` 27 ok / 5 `HV_ERROR`, targeted sync check PASS, extra API checks PASS, `amd-info selftest` 12/12, `vmInvalidExits=0`, `assertFailures=0` | Boot args unchanged. `hvf-probe` reports `set_tsc_relative` wired; a separate probe syncing TSC with a vCPU already created saw its VMCB offset go from 0 to the sync value. Extra checks confirmed space destroy while bound is refused, a second `hv_vm_destroy` is refused, managed/native MSR and TPR/CR2 round-trips work; unknown MSRs are rejected by the framework with `HV_BAD_ARGUMENT`. |
+| Reboot 2026-11-26 (direct injection build, UUID `DDE9FE2A`) | `make test` 20/20, `make kext tools` clean (393 symbols), `--apic-inject` both handlers reached, `--apic-run` handler reached, `--matrix` 79/79, `--apic` 31 ok / 5 `HV_ERROR`, `hvf-smoke` PASS, `enableFailures=0`, `assertFailures=0`, `vmInvalidExits=0`, `vmFpuMismatches=0` | The previous kext (UUID `E359D76F`) failed `--apic-inject` with `MISSED` on both legs, which is the reproduction of the reversed opcode bug. Boot args unchanged; EFI kext installed with `scripts/install-to-efi.sh '/Volumes/EFI 1'`. |
+| Reboot 2026-11-26 (MSI build, UUID `A5468CB4`) | `make test` 20/20, `make kext tools` clean, `--apic-inject` all three handlers reached, `--apic-run` handler reached, `--matrix` 79/79, `--apic` 31 ok / 5 `HV_ERROR`, `hvf-smoke` PASS, all four failure counters 0 | The previous kext answered `lapic_msi` with `ok` but the guest stayed at the entry HLT (`MISSED`). A two-vCPU probe confirmed physical MSI destination 1 and the redirection hint route to the expected vCPUs. |
+| Reboot 2026-11-26 (PIO notifier build, UUID `6A912009`) | `make test` 21/21, `make kext tools` clean (398 symbols), `--pio-notifier` add/remove `ok`, `OUT` suppressed, message `addr=3f8 size=1 value=42`, `--matrix` 79/79 with both notifier calls `ok`, `--apic-inject` and `--apic-run` still pass, `hvf-smoke` PASS, all four failure counters 0 | The previous kext returned `HV_UNSUPPORTED` (with only a receive right) or `HV_ERROR` (after a send right was added) and never fired. The client needs a send right; a receive right alone is rejected by xnu's `ipc_typed_port_copyin_send`. |
+| Reboot 2026-11-26 (exit-info build, UUID `642B927D`) | `make test` 22/22, `make kext tools` clean, `--exitinfo` all six helpers `HV_ERROR` with no event, `--exitinfo-mmio` code 7 + value `0x10100` and code 4 + vector `0x30`, `--matrix` 79/79, `--apic` 31 ok / 5 `HV_ERROR`, `--apic-inject`, `--apic-run` and `--pio-notifier` still pass, `hvf-smoke` PASS, all four failure counters 0 | Wire discovery used temporary debug builds and guest-controlled `AL`; the final build publishes real APIC events through `amdhv_exitinfo_encode()` and clears the page every run. INIT/SIPI and #GP publication remains unprobed live. |
 | VZ guest, 32 min, 6 vCPU / 4 GiB | 35,985,555 VM runs, 36,748,682 exits, 30.5M NPF exits | `vmInvalidExits = 0`, `assertFailures = 0`; EPT-violation path is the hot path. |
 | Limitation validation 2026-11-23 (0.2.0) | 64 vCPUs, 64 spaces, 16 GiB map cap, 2 concurrent VMs | unsigned process created a VM; PIO/APIC/extint answered `HV_UNSUPPORTED`. |
 | S3/S4 attempts | host never reached S3 | `sleepEvents = 0`, `wakeEvents = 0`; not a kext fault. Acceptance still pending. |

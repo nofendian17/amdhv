@@ -18,6 +18,7 @@
 
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
+#include "HvIonAbi.hpp"
 #include <libkern/c++/OSObject.h>
 
 #include "../../../include/AMDHVShared.h"
@@ -57,6 +58,8 @@ public:
     uint64_t            id() const { return fId; }
     IORWLock           *rw() const { return fRw; }
     uint64_t             tlbGen() const { return fTlbGen; }
+    /* PIO notifier group for this VM (hv_vm_add/remove_pio_notifier, and guest I/O exits). */
+    hv_ion_grp_t       *ionGroup() const { return fIon; }
 
     /* hv_vm_map / unmap / protect, in `space` (0 is the default address space). See AMDHVShared.h. */
     IOReturn map(task_t task, uint32_t space, uint64_t uva, uint64_t gpa, uint64_t size, uint32_t flags);
@@ -107,6 +110,7 @@ private:
     amdhv::space::Pool          fSpaceIds;
     uint64_t                  fPagesMapped;
     volatile uint64_t         fTlbGen;    /* bumped whenever the nested page tables change */
+    hv_ion_grp_t             *fIon;       /* xnu's PIO notifier group, owned by this VM */
 };
 
 class com_amdhv_AMDHVVm : public OSObject {
@@ -123,6 +127,10 @@ public:
 
     com_amdhv_AMDHVVmShared *shared() const { return fShared; }
     uint32_t                         index() const { return fIndex; }
+
+    /* Exit-info the in-kernel APIC produced on the last run, published to the ro page by the front end. */
+    void setApicExitInfo(const AMDHVExitInfo &x) { fExitInfo = x; }
+    AMDHVExitInfo takeApicExitInfo() { AMDHVExitInfo x = fExitInfo; fExitInfo = {}; return x; }
 
     bool init() override;
     void free() override;
@@ -196,6 +204,7 @@ private:
     bool                      fApicAccel;        /* HV_VM_ACCEL_APIC: emulate APIC MMIO exits in-kernel */
     amdhv::apic::LapicState  *fApicLapic;        /* owned by the front end's HvVcpu */
     amdhv::apic::IoApicState *fApicIoApic;       /* owned by the front end's HvVm */
+    AMDHVExitInfo             fExitInfo;         /* pending HV_VM_EXITINFO_* payload for this vCPU */
     uint32_t                  fFpuSize;
     volatile uint32_t         fKick;
     volatile uint32_t         fForceTlbFlush;    /* hv_vcpu_invalidate_tlb asked for a flush */

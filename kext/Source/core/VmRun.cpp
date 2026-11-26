@@ -359,6 +359,20 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
                 fVmcs.markAllClean();
         }
         AMDHV_STAT_INC(vmExits);
+        /* PIO notifier: Apple suppresses the guest exit when a notifier matches and sends a Mach
+         * message instead. Only OUT carries a value to report; an IN still goes to the client. */
+        if (code == EXIT_IOIO && fShared->ionGroup() && !amdhv_ioio_is_in(v->control.exitInfo1)) {
+            const uint64_t port = amdhv_ioio_port(v->control.exitInfo1);
+            const size_t size = amdhv_ioio_size(v->control.exitInfo1);
+            if (size) {
+                const uint64_t value = v->save.rax & ((1ull << (size * 8)) - 1);
+                if (hv_io_notifier_grp_fire(fShared->ionGroup(), port, size, value) == KERN_SUCCESS &&
+                    v->control.nextRip) {
+                    v->save.rip = v->control.nextRip;    /* step over the matched OUT */
+                    continue;
+                }
+            }
+        }
         /* The injection was either delivered or is reported in exitIntInfo; do not let it fire a second time. */
         v->control.eventInj    = 0;
         v->control.eventInjErr = 0;
@@ -379,7 +393,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             const bool lapic = offL != 0xFFFFFFFFu;
             const bool ioapic = offI != 0xFFFFFFFFu;
             if (lapic || ioapic) {
-                uint8_t insn[7] = {0};
+                uint8_t insn[8] = {0};   /* 66 + 67 + opcode + modrm + disp32 */
                 if (fShared->guestBytes(fSpace, v->save.rip, insn, sizeof(insn))) {
                     const amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(insn, sizeof(insn));
                     if (op.valid && op.disp == fault) {
@@ -394,28 +408,59 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
                         case 7: reg = &fGprs.rdi;  break;
                         default: break;              /* RSP: never used for APIC registers */
                         }
+                        /* An illegal APIC access is reported as #GP through AMDHV_EXITINFO_INJECT_EXCP. */
+                        AMDHVExitInfo xi = {};
+                        xi.code = AMDHV_EXITINFO_INJECT_EXCP;
+                        xi.value = 13;                 /* #GP */
+                        xi.valid = 1;
                         bool served = false;
                         if (reg) {
                             if (lapic) {
-                                if (op.isWrite)
-                                    amdhv::apic::writeReg(*fApicLapic, offL, (uint32_t)*reg);
-                                else
-                                    *reg = amdhv::apic::readReg(*fApicLapic, offL);
+                                if (op.isWrite) {
+                                    const uint32_t val = (uint32_t)*reg;
+                                    if (offL == 0x300) {          /* ICR: INIT/SIPI are published to the client */
+                                        const unsigned dm = (val >> 8) & 7;
+                                        if (dm == 3 || dm == 6) {
+                                            xi.code = dm == 3 ? AMDHV_EXITINFO_INIT_AP : AMDHV_EXITINFO_STARTUP_AP;
+                                            xi.bitmap = 1ull << (val & 0xFF);
+                                            if (dm == 6)
+                                                xi.rip = (uint64_t)(val & 0xFF) << 12;
+                                        }
+                                    } else if (offL == 0xB0) {    /* EOI: vector of the interrupt retired */
+                                        xi.code = AMDHV_EXITINFO_IOAPIC_EOI;
+                                        xi.value = amdhv::apic::highestIsrVector(*fApicLapic);
+                                    }
+                                    amdhv::apic::writeReg(*fApicLapic, offL, val);
+                                } else {
+                                    xi.code = AMDHV_EXITINFO_APIC_ACCESS_READ;
+                                    xi.value = amdhv::apic::readReg(*fApicLapic, offL);
+                                    *reg = xi.value;
+                                }
                                 served = true;
                             } else if (offI == 0 || offI == 0x10) {
                                 /* IOREGSEL at +0, IOWIN at +0x10. */
                                 if (op.isWrite) {
                                     if (offI == 0)
                                         fApicIoApic->ioregsel = (uint32_t)*reg & 0xFF;
-                                    else
+                                    else {
+                                        if (fApicIoApic->ioregsel == 0x10) {
+                                            xi.code = AMDHV_EXITINFO_IOAPIC_EOI;
+                                            xi.value = (uint8_t)*reg;
+                                        }
                                         amdhv::apic::ioWrite(*fApicIoApic, fApicIoApic->ioregsel, (uint32_t)*reg);
+                                    }
                                 } else {
                                     *reg = offI == 0 ? fApicIoApic->ioregsel
                                                      : amdhv::apic::ioRead(*fApicIoApic, fApicIoApic->ioregsel);
+                                    if (offI == 0x10) {
+                                        xi.code = AMDHV_EXITINFO_APIC_ACCESS_READ;
+                                        xi.value = (uint32_t)*reg;
+                                    }
                                 }
                                 served = true;
                             }
                         }
+                        setApicExitInfo(xi);
                         if (served) {
                             if (op.reg == 0)
                                 v->save.rax = rax;
