@@ -338,6 +338,54 @@ inline unsigned pendingVector(const IoApicState &s)
     return best;
 }
 
+/* Wire formats of the two task-trap-10 calls that inject interrupts. Decoded from the framework's
+ * own argument blocks (see docs/COMPATIBILITY_CHECKLIST.md); the IOAPIC entry layout is the one
+ * Apple documents for hv_vm_send_ioapic_intr and AMD APM Vol.2 uses for the I/O APIC RTE.
+ * Source: https://developer.apple.com/documentation/hypervisor/hv_vm_send_ioapic_intr
+ *         https://developer.apple.com/documentation/hypervisor/hv_vm_lapic_set_intr */
+struct LapicIntrWire {
+    unsigned vcpu;
+    unsigned vector;
+    unsigned trigger;
+};
+
+inline LapicIntrWire decodeLapicIntr(uint64_t a, uint64_t b)
+{
+    return { (unsigned)(a & 0xFFFFFFFFull), (unsigned)((a >> 32) & 0xFFull), (unsigned)(b & 0xFFull) };
+}
+
+struct IoapicIntrWire {
+    unsigned vector;
+    unsigned destination;
+    bool     masked;
+    bool     valid;
+};
+
+inline IoapicIntrWire decodeIoapicIntr(uint64_t data)
+{
+    const unsigned vector = (unsigned)(data & 0xFFull);
+    const bool     masked = (data & 0x10000ull) != 0;
+    return { vector, (unsigned)((data >> 56) & 0xFFull), masked, vector >= 16 && vector <= 255 && !masked };
+}
+
+/* hv_vm_lapic_msi receives an MSI message: address 31:20 = 0xfee, 19:12 = destination, bit 3 =
+ * redirection hint, bit 2 = destination mode; data 7:0 = vector (AMD APM Vol.2, LAPIC MSI). */
+struct LapicMsiWire {
+    unsigned vector;
+    unsigned destination;
+    bool     logical;
+    bool     redirect;
+    bool     valid;
+};
+
+inline LapicMsiWire decodeLapicMsi(uint64_t addr, uint64_t data)
+{
+    const unsigned vector = (unsigned)(data & 0xFFull);
+    return { vector, (unsigned)((addr >> 12) & 0xFFull), ((addr >> 2) & 1ull) != 0,
+             ((addr >> 3) & 1ull) != 0,
+             (addr & 0xFFF00000ull) == 0xFEE00000ull && vector >= 16 && vector <= 255 };
+}
+
 } // namespace apic
 } // namespace amdhv
 
