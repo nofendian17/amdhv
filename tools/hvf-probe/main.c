@@ -481,7 +481,8 @@ static void probe_api_matrix(void)
     printf("  %-52s %" PRIu64 " (uint64_t, not hv_return_t)\n", "hv_tsc_clock", clock);
 
     mach_port_t port = MACH_PORT_NULL;
-    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS) {
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS &&
+        mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS) {
         record_and_print("hv_vm_add_pio_notifier", hv_vm_add_pio_notifier(0x3F8, 1, 0, port, 0));
         record_and_print("hv_vm_remove_pio_notifier", hv_vm_remove_pio_notifier(0x3F8, 1, 0, port, 0));
         mach_port_deallocate(mach_task_self(), port);
@@ -760,6 +761,234 @@ static void probe_apic_run(void)
     munmap(ram, RAM_SIZE);
 }
 
+/** Direct LAPIC injection through the three provider APIs. Vector 0x30 reaches 0x1200 via
+ * hv_vm_lapic_set_intr, 0x50 reaches 0x1250 via hv_vm_send_ioapic_intr (an IOAPIC RTE), and 0x60
+ * reaches 0x1260 via hv_vm_lapic_msi (physical destination 0). Each successive vector has a higher
+ * class than the one left in ISR by the previous leg, so the LAPIC arbiter does not block it. */
+static void probe_apic_inject(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) { perror("mmap"); return; }
+    memset(ram, 0, RAM_SIZE);
+    ram[0x1000] = 0xF4;                       /* entry HLT */
+    ram[0x1200] = 0xF4;                       /* vector 0x30 handler */
+    ram[0x1250] = 0xF4;                       /* vector 0x50 handler */
+    ram[0x1260] = 0xF4;                       /* vector 0x60 handler */
+    ram[0xC0] = 0x00; ram[0xC1] = 0x12;       /* IVT[0x30] -> 0x1200 */
+    ram[0x140] = 0x50; ram[0x141] = 0x12;     /* IVT[0x50] -> 0x1250 */
+    ram[0x180] = 0x60; ram[0x181] = 0x12;     /* IVT[0x60] -> 0x1260 */
+
+    hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
+    print_call("hv_vm_create(HV_VM_ACCEL_APIC)", r);
+    if (r != HV_SUCCESS) { munmap(ram, RAM_SIZE); return; }
+    print_call("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    print_call("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) { hv_vm_destroy(); munmap(ram, RAM_SIZE); return; }
+    setup_controls(v);
+    setup_real_mode(v, 0x1000);
+    wreg(v, HV_X86_RFLAGS, 0x202);            /* IF=1: external interrupts are not masked */
+    wreg(v, HV_X86_TPR, 0);
+
+    print_call("lapic_set_intr(vcpu0, 0x30)", hv_vm_lapic_set_intr(0, 0x30, HV_APIC_EDGE_TRIGGER));
+    hv_vcpu_run(v);
+    uint64_t rip = rvmcs(v, VMCS_GUEST_RIP);
+    printf("  %-52s RIP %#llx (%s)\n", "lapic_set_intr guest run", (unsigned long long)rip,
+           rip == 0x1200 ? "handler reached" : "MISSED");
+
+    wreg(v, HV_X86_RIP, 0x1000);
+    print_call("send_ioapic_intr(RTE 0x50)", hv_vm_send_ioapic_intr(0x50));
+    hv_vcpu_run(v);
+    rip = rvmcs(v, VMCS_GUEST_RIP);
+    printf("  %-52s RIP %#llx (%s)\n", "send_ioapic_intr guest run", (unsigned long long)rip,
+           rip == 0x1250 ? "handler reached" : "MISSED");
+
+    wreg(v, HV_X86_RIP, 0x1000);
+    print_call("lapic_msi(RTE 0x60)", hv_vm_lapic_msi(0xFEE00000ull, 0x60ull));
+    hv_vcpu_run(v);
+    rip = rvmcs(v, VMCS_GUEST_RIP);
+    printf("  %-52s RIP %#llx (%s)\n", "lapic_msi guest run", (unsigned long long)rip,
+           rip == 0x1260 ? "handler reached" : "MISSED");
+
+    hv_vcpu_destroy(v);
+    hv_vm_destroy();
+    munmap(ram, RAM_SIZE);
+}
+
+/** No-info regression check: without an APIC event, hv_vcpu_exit_info and all five helpers
+ * must answer HV_ERROR, as on Apple. With an in-kernel APIC event the front end publishes the
+ * matching payload in the ro page and the helpers decode it. */
+static void probe_exitinfo(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) { perror("mmap"); return; }
+    memset(ram, 0, RAM_SIZE);
+    ram[0x1000] = 0xF4;                       /* hlt */
+    hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
+    print_call("hv_vm_create(HV_VM_ACCEL_APIC)", r);
+    if (r != HV_SUCCESS) { munmap(ram, RAM_SIZE); return; }
+    print_call("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ|HV_MEMORY_WRITE|HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    print_call("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) { hv_vm_destroy(); munmap(ram, RAM_SIZE); return; }
+    setup_controls(v);
+    setup_real_mode(v, 0x1000);
+    setup_real_mode(v, 0x1000);
+    hv_vcpu_run(v);
+    hv_vm_exitinfo_t code = 0;
+    hv_return_t er = hv_vcpu_exit_info(v, &code);
+    printf("exit_info       ret=%d code=%u\n", er, code);
+    bool a[4] = {false, false, false, false};
+    printf("exit_init_ap    ret=%d\n", hv_vcpu_exit_init_ap(v, a, 4));
+    uint64_t rip = 0;
+    printf("exit_startup_ap ret=%d rip=%#llx\n", hv_vcpu_exit_startup_ap(v, a, 4, &rip),
+           (unsigned long long)rip);
+    uint8_t vec = 0;
+    printf("exit_ioapic_eoi ret=%d vec=%#x\n", hv_vcpu_exit_ioapic_eoi(v, &vec), vec);
+    uint32_t value = 0;
+    printf("exit_apic_read  ret=%d value=%#x\n", hv_vcpu_exit_apic_access_read(v, &value), value);
+    bool valid = false, restart = false; uint32_t err = 0;
+    printf("exit_inject_exc ret=%d vec=%#x valid=%d code=%#x restart=%d\n",
+           hv_vcpu_exit_inject_excp(v, &vec, &valid, &err, &restart), vec, valid, err, restart);
+
+    hv_vcpu_destroy(v);
+    hv_vm_destroy();
+    munmap(ram, RAM_SIZE);
+}
+
+/** Trigger an in-kernel IOAPIC MMIO read so the front end publishes HV_VM_EXITINFO_APIC_ACCESS_READ. */
+static void probe_exitinfo_mmio(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) { perror("mmap"); return; }
+    memset(ram, 0, RAM_SIZE);
+    /* 66 = 32-bit operand, 67 = 32-bit address in real mode (see ApicMmio.hpp). */
+    unsigned off = 0;
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0xB8; /* mov eax, 0x10 */
+    ram[0x1000 + off++] = 0x10; ram[0x1000 + off++] = 0; ram[0x1000 + off++] = 0; ram[0x1000 + off++] = 0;
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0x67; ram[0x1000 + off++] = 0x89; ram[0x1000 + off++] = 0x05;
+    ram[0x1000 + off++] = 0x00; ram[0x1000 + off++] = 0x00; ram[0x1000 + off++] = 0xC0; ram[0x1000 + off++] = 0xFE; /* mov [0xFEC00000],eax */
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0x67; ram[0x1000 + off++] = 0x8B; ram[0x1000 + off++] = 0x05;
+    ram[0x1000 + off++] = 0x10; ram[0x1000 + off++] = 0x00; ram[0x1000 + off++] = 0xC0; ram[0x1000 + off++] = 0xFE; /* mov eax,[0xFEC00010] */
+    ram[0x1000 + off++] = 0xF4;                                 /* hlt */
+
+    hv_return_t r = hv_vm_create(HV_VM_ACCEL_APIC);
+    print_call("hv_vm_create(HV_VM_ACCEL_APIC)", r);
+    if (r != HV_SUCCESS) { munmap(ram, RAM_SIZE); return; }
+    print_call("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ|HV_MEMORY_WRITE|HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    print_call("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) { hv_vm_destroy(); munmap(ram, RAM_SIZE); return; }
+    setup_controls(v);
+    setup_real_mode(v, 0x1000);
+    wvmcs(v, VMCS_GUEST_CS_LIMIT, 0xFFFFFFFF);   /* unreal mode: 0xFEC00000 is beyond 64 KiB */
+    wvmcs(v, VMCS_GUEST_DS_LIMIT, 0xFFFFFFFF);
+    printf("  %-52s %#llx %02x %02x %02x %02x %02x %02x %02x\n", "code at 0x1000",
+           (unsigned long long)rvmcs(v, VMCS_GUEST_RIP), ram[0x1000], ram[0x1001], ram[0x1002],
+           ram[0x1003], ram[0x1004], ram[0x1005], ram[0x1006]);
+    hv_return_t rr = hv_vcpu_run(v);
+    uint64_t rax = 0;
+    hv_vcpu_read_register(v, HV_X86_RAX, &rax);
+    printf("  %-52s ret=%d reason=%llu RIP %#llx EAX %#llx GPA %#llx\n", "guest run", rr,
+           (unsigned long long)(rvmcs(v, VMCS_RO_EXIT_REASON) & 0xFFFF),
+           (unsigned long long)rvmcs(v, VMCS_GUEST_RIP), (unsigned long long)rax,
+           (unsigned long long)rvmcs(v, 0x2400));
+    hv_vm_exitinfo_t code = 0;
+    uint8_t vec = 0;
+    printf("  %-52s ret=%d code=%u\n", "exit_info", hv_vcpu_exit_info(v, &code), code);
+    uint32_t value = 0;
+    printf("  %-52s ret=%d value=%#x\n", "exit_apic_access_read",
+           hv_vcpu_exit_apic_access_read(v, &value), value);
+
+    /* Second leg: write EOI (vector 0x30) through the IOAPIC window -> HV_VM_EXITINFO_IOAPIC_EOI. */
+    off = 0;
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0xB8;   /* mov eax, 0x10 */
+    ram[0x1000 + off++] = 0x10; ram[0x1000 + off++] = 0; ram[0x1000 + off++] = 0; ram[0x1000 + off++] = 0;
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0x67; ram[0x1000 + off++] = 0x89; ram[0x1000 + off++] = 0x05;
+    ram[0x1000 + off++] = 0x00; ram[0x1000 + off++] = 0x00; ram[0x1000 + off++] = 0xC0; ram[0x1000 + off++] = 0xFE;
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0xB8;   /* mov eax, 0x30 */
+    ram[0x1000 + off++] = 0x30; ram[0x1000 + off++] = 0; ram[0x1000 + off++] = 0; ram[0x1000 + off++] = 0;
+    ram[0x1000 + off++] = 0x66; ram[0x1000 + off++] = 0x67; ram[0x1000 + off++] = 0x89; ram[0x1000 + off++] = 0x05;
+    ram[0x1000 + off++] = 0x10; ram[0x1000 + off++] = 0x00; ram[0x1000 + off++] = 0xC0; ram[0x1000 + off++] = 0xFE;
+    ram[0x1000 + off++] = 0xF4;
+    wreg(v, HV_X86_RIP, 0x1000);
+    hv_vcpu_run(v);
+    code = 0;
+    printf("  %-52s ret=%d code=%u RIP %#llx\n", "EOI run", hv_vcpu_exit_info(v, &code), code,
+           (unsigned long long)rvmcs(v, VMCS_GUEST_RIP));
+    vec = 0;
+    printf("  %-52s ret=%d vec=%#x\n", "exit_ioapic_eoi", hv_vcpu_exit_ioapic_eoi(v, &vec), vec);
+    hv_vcpu_destroy(v);
+    hv_vm_destroy();
+    munmap(ram, RAM_SIZE);
+}
+
+/** PIO notifier: a real-mode guest writes 0x42 to port 0x3f8. The provider should send an
+ * hv_ion_message_t to the registered Mach port, suppress the I/O exit and step over the OUT, so
+ * the run ends at the following HLT (0x1006) instead of at the OUT (0x1005). */
+static void probe_pio_notifier(void)
+{
+    uint8_t *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) { perror("mmap"); return; }
+    memset(ram, 0, RAM_SIZE);
+    ram[0x1000] = 0xBA; ram[0x1001] = 0xF8; ram[0x1002] = 0x03; /* mov dx, 0x3f8 */
+    ram[0x1003] = 0xB0; ram[0x1004] = 0x42;                     /* mov al, 0x42  */
+    ram[0x1005] = 0xEE;                                          /* out dx, al    */
+    ram[0x1006] = 0xF4;                                          /* hlt           */
+
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    printf("mach_port_allocate                              kr=0x%x port=%u\n", kr, port);
+    if (kr != KERN_SUCCESS) { munmap(ram, RAM_SIZE); return; }
+    /* hv_vm_add_pio_notifier requires a send right; the receive right alone is not enough. */
+    kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    printf("mach_port_insert_right(MAKE_SEND)               kr=0x%x\n", kr);
+    if (kr != KERN_SUCCESS) { mach_port_deallocate(mach_task_self(), port); munmap(ram, RAM_SIZE); return; }
+
+    hv_return_t r = hv_vm_create(HV_VM_DEFAULT);
+    print_call("hv_vm_create", r);
+    if (r != HV_SUCCESS) {
+        mach_port_deallocate(mach_task_self(), port);
+        munmap(ram, RAM_SIZE);
+        return;
+    }
+    print_call("hv_vm_map", hv_vm_map(ram, 0, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+    hv_vcpuid_t v = 0;
+    r = hv_vcpu_create(&v, HV_VCPU_DEFAULT);
+    print_call("hv_vcpu_create", r);
+    if (r != HV_SUCCESS) {
+        hv_vm_destroy();
+        mach_port_deallocate(mach_task_self(), port);
+        munmap(ram, RAM_SIZE);
+        return;
+    }
+    setup_controls(v);
+    setup_real_mode(v, 0x1000);
+    wreg(v, HV_X86_RFLAGS, 2);
+
+    print_call("hv_vm_add_pio_notifier(0x3f8)", hv_vm_add_pio_notifier(0x3F8, 1, 0x42, port, 0));
+    hv_vcpu_run(v);
+    uint64_t rip = rvmcs(v, VMCS_GUEST_RIP);
+    printf("  %-52s RIP %#llx (%s)\n", "guest run after OUT", (unsigned long long)rip,
+           rip == 0x1006 ? "OUT suppressed, HLT reached" : "NOT suppressed");
+
+    /* The kernel appends a mach_msg_trailer_t to the 48-byte notifier message. */
+    struct { mach_msg_header_t h; uint64_t addr, size, value; uint8_t trailer[64]; } msg;
+    kr = mach_msg(&msg.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg), port, 500, MACH_PORT_NULL);
+    printf("  %-52s kr=0x%x msgh_size=%u addr=%llx size=%llu value=%llx\n", "notifier message", kr,
+           msg.h.msgh_size, (unsigned long long)msg.addr, (unsigned long long)msg.size,
+           (unsigned long long)msg.value);
+
+    print_call("hv_vm_remove_pio_notifier(0x3f8)", hv_vm_remove_pio_notifier(0x3F8, 1, 0x42, port, 0));
+    hv_vcpu_destroy(v);
+    hv_vm_destroy();
+    mach_port_deallocate(mach_task_self(), port);
+    munmap(ram, RAM_SIZE);
+}
+
 /** Guest-side LAPIC MMIO: MOV EAX,[0xFEE00080] then HLT. The model's TPR is set to 0x55 first,
  * so an in-kernel NPF emulation returns 0x55 in EAX and resumes at the HLT (0x1006). */
 static void probe_apic_mmio(void)
@@ -846,6 +1075,22 @@ static bool handle_internal_mode(int argc, char **argv)
     }
     if (argc > 1 && strcmp(argv[1], "--apic-run") == 0) {
         probe_apic_run();
+        return true;
+    }
+    if (argc > 1 && strcmp(argv[1], "--apic-inject") == 0) {
+        probe_apic_inject();
+        return true;
+    }
+    if (argc > 1 && strcmp(argv[1], "--pio-notifier") == 0) {
+        probe_pio_notifier();
+        return true;
+    }
+    if (argc > 1 && strcmp(argv[1], "--exitinfo") == 0) {
+        probe_exitinfo();
+        return true;
+    }
+    if (argc > 1 && strcmp(argv[1], "--exitinfo-mmio") == 0) {
+        probe_exitinfo_mmio();
         return true;
     }
     if (argc > 1 && strcmp(argv[1], "--apic-mmio") == 0) {
@@ -1003,7 +1248,8 @@ int main(int argc, char **argv)
     print_call("hv_vm_ioapic_deassert_irq(0)", hv_vm_ioapic_deassert_irq(0));
 
     mach_port_t port = MACH_PORT_NULL;
-    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS) {
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS &&
+        mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS) {
         print_call("hv_vm_add_pio_notifier(0x3f8)", hv_vm_add_pio_notifier(0x3F8, 1, 0, port, 0));
         print_call("hv_vm_remove_pio_notifier(0x3f8)", hv_vm_remove_pio_notifier(0x3F8, 1, 0, port, 0));
         mach_port_deallocate(mach_task_self(), port);
