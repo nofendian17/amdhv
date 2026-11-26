@@ -18,6 +18,7 @@
 #define AMDHV_SHARED_H
 
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -423,6 +424,52 @@ static inline uint32_t amdhv_amd_stepping(uint32_t cpuid1Eax)
 static inline int amdhv_is_amd_vendor(uint32_t ebx, uint32_t ecx, uint32_t edx)
 {
     return ebx == 0x68747541u && edx == 0x69746E65u && ecx == 0x444D4163u;
+}
+
+/** Task traps 8/9 carry a five-word argument block: addr, size, value, mach port name, flags.
+ * Decoded from the framework's own trap log; size must be 1, 2 or 4 and the port must be valid. */
+typedef struct {
+    uint64_t addr, size, value;
+    uint32_t portName, flags;
+    int      valid;
+} AMDHVIonWire;
+
+static inline AMDHVIonWire amdhv_ion_decode(const uint64_t *w)
+{
+    AMDHVIonWire x = { w[0], w[1], w[2], (uint32_t)w[3], (uint32_t)w[4], 0 };
+    x.valid = (w[1] == 1 || w[1] == 2 || w[1] == 4) && w[3] != 0;
+    return x;
+}
+
+/* HV_VM_EXITINFO_* values from the macOS 15.x SDK (hv_types.h), named locally because the kext
+ * build does not include the Hypervisor.framework headers. */
+enum {
+    AMDHV_EXITINFO_VMX             = 1,
+    AMDHV_EXITINFO_INIT_AP         = 2,
+    AMDHV_EXITINFO_STARTUP_AP      = 3,
+    AMDHV_EXITINFO_IOAPIC_EOI      = 4,
+    AMDHV_EXITINFO_INJECT_EXCP     = 5,
+    AMDHV_EXITINFO_SMI             = 6,
+    AMDHV_EXITINFO_APIC_ACCESS_READ = 7,
+};
+
+/** Exit-info payload published in the vCPU read-only page. Offsets were decoded from the
+ * framework's own helpers (hvf-probe --exitinfo): 0x20 code, 0x28 target bitmap, 0x48 value/low
+ * byte vector, 0x49 valid, 0x4c error code, 0x50 startup RIP (low byte = restart flag). */
+typedef struct {
+    uint32_t code, value, err;
+    uint64_t bitmap, rip;
+    int      valid;
+} AMDHVExitInfo;
+
+static inline void amdhv_exitinfo_encode(uint8_t *ro, const AMDHVExitInfo *x)
+{
+    memcpy(ro + 0x20, &x->code, 4);
+    memcpy(ro + 0x28, &x->bitmap, 8);
+    memcpy(ro + 0x48, &x->value, 4);
+    ro[0x49] = (uint8_t)(x->valid != 0);
+    memcpy(ro + 0x4c, &x->err, 4);
+    memcpy(ro + 0x50, &x->rip, 8);
 }
 
 #ifdef __cplusplus

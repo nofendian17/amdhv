@@ -509,6 +509,7 @@ kern_return_t tVcpuCreate(void *target, uint64_t arg)
     }
     v->vm = vm;
     v->id = id;
+    v->lapic.apic_id = id;    /* Apple's APIC ID numbering: the IOAPIC destination is a vCPU id */
     v->rw = vm->kva[0] + id * kRwSlice;
     v->ro = vm->kva[1] + id * kRoSlice;
     bzero(v->rw, kRwSlice);
@@ -1193,6 +1194,12 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
         }
     }
     fpuToPage(v);                                       /* the core's FP state and XCR0 after the run */
+    /* The framework's hv_vcpu_exit_info() reads this payload straight out of the ro page. Clear
+     * it every run so a stale exit is never reported after an unrelated exit. */
+    if (v->vm->apicAccel) {
+        AMDHVExitInfo xi = v->cpu->takeApicExitInfo();
+        amdhv_exitinfo_encode(v->ro, &xi);
+    }
     v->ro[kRoSynced] &= ~1;                             /* the DRs in the page are stale: the next read of one asks (thread trap 11) */
     for (unsigned pos = 0; pos < v->nManaged; pos++) {  /* managed MSRs live in the guest: their values are read from the core after each run */
         unsigned idx = v->managedIdx[pos];
@@ -1501,7 +1508,7 @@ kern_return_t tSetShadowAccess(void *target, uint64_t arg)
 
 /* hv_vm_atpic, hv_vm_ioapic, hv_vm_lapic and hv_vm_set_apic_bus_freq arrive as one task trap with a
  * packed op code in the first word (the observed enum values are ASCII-ish sequential: 0x6a..0x7a).
- * The state lives in the VM; delivery into the guest is a later slice. */
+ * The state lives in the VM; 0x6a/0x73 feed the per-vCPU LAPIC IRR that the run path injects. */
 /* ---- task traps: APIC emulation controls ---- */
 struct ApicCtlArg { uint64_t op, a, b, c, d, e, f, g; };
 
@@ -1545,9 +1552,38 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
                   /* the state pointer is in a; b is a framework cookie; state begins at +8 */
                   if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
     case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break;
-    case 0x73: if ((x.b & 0x10000u) == 0 && vm->vcpu[0])
-                   amdhv::apic::setIrr(vm->vcpu[0]->lapic, (unsigned)(x.b & 0xFF)); break;
-    case 0x6a: break;                       /* vcpu/vector are in a nested block; logged, not delivered yet */
+    /* hv_vm_send_ioapic_intr(data): Apple documents data as an IOAPIC redirection table entry
+     * (vector 7:0, mask 16, destination 63:56). Deliver to that LAPIC, or to all for 0xff. */
+    case 0x73: {
+        const amdhv::apic::IoapicIntrWire w = amdhv::apic::decodeIoapicIntr(x.a);
+        if (!w.valid)
+            break;
+        IOLockLock(vm->lock);
+        for (unsigned id = 0; id < kMaxVcpus; id++) {
+            HvVcpu *target = vm->vcpu[id];
+            if (!target || !target->cpu)
+                continue;
+            if (w.destination != 0xFF && target->lapic.apic_id != w.destination)
+                continue;
+            amdhv::apic::setIrr(target->lapic, w.vector);
+        }
+        IOLockUnlock(vm->lock);
+        break;
+    }
+    /* hv_vm_lapic_set_intr(vcpu, vector, trigger): a carries the vCPU id in its low half and the
+     * vector in bits 32..39; b's low byte is the trigger. The LAPIC arbiter (AMD APM Vol.2 ch.16)
+     * picks the highest IRR entry above PPR and the run path injects it as a guest event. */
+    case 0x6a: {
+        const amdhv::apic::LapicIntrWire w = amdhv::apic::decodeLapicIntr(x.a, x.b);
+        if (w.vcpu >= kMaxVcpus)
+            break;
+        IOLockLock(vm->lock);
+        HvVcpu *target = vm->vcpu[w.vcpu];
+        if (target && target->cpu)
+            amdhv::apic::setIrr(target->lapic, w.vector);
+        IOLockUnlock(vm->lock);
+        break;
+    }
     case 0x7a: break;                       /* APIC bus frequency: no timer emulation yet */
     default: vmUnpin(vm); return kHvUnsupportedCode;
     }
@@ -1555,11 +1591,72 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
     return kHvOk;
 }
 
-/** hv_vm_lapic_msi packs (data << 32) | addr. MSI routing into the guest is a later slice. */
+/** hv_vm_lapic_msi packs (data << 32) | addr. Route the message's vector to the addressed LAPIC(s).
+ * A redirection hint or destination 0xff reaches every vCPU; logical destinations use the flat
+ * LDR bitmap (the DFR cluster model is not emulated). */
 kern_return_t tLapicMsi(void *target, uint64_t arg)
 {
     note(HV_TASK_TRAP, 11, arg);
-    return target ? kHvOk : kHvNoDev;
+    HvVm *vm = static_cast<HvVm *>(target);
+    if (!vm || !vmPin(vm))
+        return kHvNoDev;
+    const amdhv::apic::LapicMsiWire w = amdhv::apic::decodeLapicMsi((uint32_t)arg, (uint32_t)(arg >> 32));
+    if (w.valid) {
+        IOLockLock(vm->lock);
+        for (unsigned id = 0; id < kMaxVcpus; id++) {
+            HvVcpu *vcpu = vm->vcpu[id];
+            if (!vcpu || !vcpu->cpu)
+                continue;
+            bool selected = w.redirect || w.destination == 0xFF;
+            if (!selected) {
+                /* Flat logical destination mode: LDR's low byte is the bitmap of accepted IDs. */
+                selected = w.logical ? ((vcpu->lapic.ldr & 0xFFu) & w.destination) != 0
+                                     : vcpu->lapic.apic_id == w.destination;
+            }
+            if (selected)
+                amdhv::apic::setIrr(vcpu->lapic, w.vector);
+        }
+        IOLockUnlock(vm->lock);
+    }
+    vmUnpin(vm);
+    return kHvOk;
+}
+
+/* hv_vm_add/remove_pio_notifier arrive as task traps 8/9 with the same five-word block:
+ * addr, size, value, mach port name, flags. xnu's hv_io_notifier_grp_* owns the entries and the
+ * send rights, so this front end only forwards the request to the VM's group. */
+static kern_return_t ionTrap(void *target, uint64_t arg, bool add)
+{
+    HvVm *vm = static_cast<HvVm *>(target);
+    if (!vm || !vm->shared || !vm->shared->ionGroup() || !vmPin(vm))
+        return kHvNoDev;
+    uint64_t w[5] = {0};
+    kern_return_t rc = copyin((user_addr_t)arg, w, sizeof(w)) ? kHvError : kHvOk;
+    if (rc == kHvOk) {
+        AMDHVIonWire x = amdhv_ion_decode(w);
+        if (!x.valid)
+            rc = kHvBadArg;
+        else {
+            hv_ion_t ion = { x.addr, x.size, x.value, x.portName, x.flags };
+            kern_return_t kr = add ? hv_io_notifier_grp_add(vm->shared->ionGroup(), &ion)
+                                   : hv_io_notifier_grp_remove(vm->shared->ionGroup(), &ion);
+            rc = hvFromIo((IOReturn)kr);
+        }
+    }
+    vmUnpin(vm);
+    return rc;
+}
+
+kern_return_t tVmAddIon(void *target, uint64_t arg)
+{
+    note(HV_TASK_TRAP, 8, arg);
+    return ionTrap(target, arg, true);
+}
+
+kern_return_t tVmRemoveIon(void *target, uint64_t arg)
+{
+    note(HV_TASK_TRAP, 9, arg);
+    return ionTrap(target, arg, false);
 }
 
 /** Thread trap 13: per-vCPU APIC sub-ops. The tag is the low byte of word 0 and the state pointer
@@ -1629,11 +1726,11 @@ kern_return_t stub(void *target, uint64_t arg)
 
 #define S(T, I) stub<T, I>
 /* Task traps: 0 vm_create, 1 vm_destroy, 2/3 space_create/destroy, 4 vm_map, 5 vm_unmap, 6 vm_protect, 7 vm_sync_tsc,
- * 10 tIntCtl (AT-PIC/IOAPIC), 11 tLapicMsi, 12 vcpu_create and 13 vcpu_interrupt are real;
- * 8/9 (PIO notifier) and 14/15 are logged and answered per mode. */
+ * 8/9 (PIO notifier), 10 tIntCtl (AT-PIC/IOAPIC), 11 tLapicMsi, 12 vcpu_create and 13 vcpu_interrupt are real;
+ * 14/15 are logged stubs. */
 /* ---- the tables xnu calls into ---- */
 const hv_trap_t kTaskTable[kTraps] = {tVmCreate, tVmDestroy, tVmSpaceCreate, tVmSpaceDestroy, tVmMap, tVmUnmap, tVmProtect,
-                                      tVmSyncTsc, S(0, 8), S(0, 9), tIntCtl, tLapicMsi, tVcpuCreate, tVcpuInterrupt, S(0, 14),
+                                      tVmSyncTsc, tVmAddIon, tVmRemoveIon, tIntCtl, tLapicMsi, tVcpuCreate, tVcpuInterrupt, S(0, 14),
                                       S(0, 15)};
 /* Thread traps: 0 run, 1 run_until (deadline clamped onto the slice), 2 invalidate_tlb, 3/4 managed MSRs on/off, 5
  * vcpu_destroy, 6 set address space, 7 read slot, 8 set shadow access (no-op), 9 set APIC address (no-op),

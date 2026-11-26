@@ -33,7 +33,8 @@ $(BUILD):
 TESTS := host_test vmcb_layout npt_test vmx_map_test vmcs_state_test fpu_state_test \
          msr_map_test slots_test run_deadline_test asid_test tlb_policy_test \
          sleep_policy_test clean_bits_test space_pool_test hv_support_decode_test \
-         tsc_offset_test apic_test apic_mmio_test hv_api_constants_test hv_kext_abi_test
+         tsc_offset_test apic_test apic_mmio_test hv_api_constants_test hv_kext_abi_test \
+         ion_test exitinfo_test
 TEST_BINS := $(addprefix $(BUILD)/,$(TESTS))
 
 # Sanitizers cover the allocator/rollback and layout tests; fpu_state_test also
