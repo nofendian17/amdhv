@@ -151,10 +151,11 @@ void testAccessRights()
     CHECK(amdhv::vmcb::segAttrib(0xA09B) == attribFromAr(0xA09B));
 }
 
-SvmExit ex(uint64_t code, uint64_t i1 = 0, uint64_t i2 = 0, uint64_t rip = 0x1000, uint64_t next = 0, uint32_t perm = 0)
+SvmExit ex(uint64_t code, uint64_t i1 = 0, uint64_t i2 = 0, uint64_t rip = 0x1000, uint64_t next = 0, uint32_t perm = 0,
+           uint32_t insnLen = 0)
 {
     SvmExit e = {};
-    e.code = code; e.info1 = i1; e.info2 = i2; e.rip = rip; e.nextRip = next; e.nptPerm = perm;
+    e.code = code; e.info1 = i1; e.info2 = i2; e.rip = rip; e.nextRip = next; e.nptPerm = perm; e.insnLen = insnLen;
     return e;
 }
 
@@ -207,7 +208,9 @@ void testExits()
     CHECK((v.qual & 7) == 2 && (v.qual & (1 << 3)) && !(v.qual & (1 << 4)) && (v.qual & (1 << 5)));   /* write to a R-X page */
     CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x15, 0), &v) && (v.qual & 7) == 4);       /* instruction fetch */
     CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x4, 0x100010), &v) && (v.qual & 7) == 1); /* data read */
-    CHECK(v.instrLen == 0);
+    /* AMD has no nRIP on NPF (APM 15.7.1); APM 15.8.4 puts the fetched byte count in VMCB 0xD0. */
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x6, 0x102010, 0x1018, 0, 0, 7), &v) && v.instrLen == 7);
+    CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x6, 0x102010, 0x1018, 0x101a, 0, 7), &v) && v.instrLen == 2);
     /* QEMU only emulates an EPT violation when bit 7 (linear address valid) and bit 8 (final translation) are set. */
     CHECK(translateExit(ex(EXIT_NPF, gpaValid | 0x6, 0x102010), &v) && (v.qual & (1 << 7)) && (v.qual & (1 << 8)));
     CHECK(translateExit(ex(EXIT_NPF, gpaValid | (1ull << 33) | 0x6, 0x102010), &v) && (v.qual & (1 << 7)) && !(v.qual & (1 << 8)));   /* page walk */
@@ -217,6 +220,7 @@ void testExits()
     /* Exceptions: #PF has an error code and the faulting address; #BP is a software exception; #UD has no code. */
     CHECK(translateExit(ex(0x40 + 14, 0x2, 0xdead000), &v) && v.reason == VMX_EXC_NMI);
     CHECK((v.intrInfo & 0xFF) == 14 && (v.intrInfo & INTR_VALID) && (v.intrInfo & INTR_ERRCODE) && v.intrError == 2 && v.qual == 0xdead000);
+    CHECK(v.guestLinear == 0xdead000);   /* VMCS_RO_GUEST_LIN_ADDR is exposed by the SDK */
     CHECK(((v.intrInfo >> 8) & 7) == INTR_HW_EXC);
     CHECK(translateExit(ex(0x40 + 3), &v) && ((v.intrInfo >> 8) & 7) == INTR_SW_EXC);
     CHECK(translateExit(ex(0x40 + 6), &v) && !(v.intrInfo & INTR_ERRCODE));

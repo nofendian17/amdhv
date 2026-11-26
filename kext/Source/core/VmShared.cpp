@@ -185,6 +185,7 @@ bool com_amdhv_AMDHVVmShared::init()
     bzero(fVcpus, sizeof(fVcpus));
     fPagesMapped = 0;
     fTlbGen = 1;                  /* 1, not 0: every vCPU's first run flushes the TLB */
+    fIon = nullptr;
     fSpaceIds.reset();            /* space 0 (fNpt) is the default; the rest start free */
     fRw = IORWLockAlloc();
     fRegLock = IOLockAlloc();
@@ -213,13 +214,20 @@ void com_amdhv_AMDHVVmShared::free()
         IOLockFree(fRegLock);
         fRegLock = nullptr;
     }
+    if (fIon) {
+        hv_io_notifier_grp_free(&fIon);      /* releases every entry's send right */
+        fIon = nullptr;
+    }
     OSObject::free();
 }
 
 bool com_amdhv_AMDHVVmShared::setup(task_t owner)
 {
     fOwner = owner;
-    return fNpt.init(kNptAllocator);
+    if (!fNpt.init(kNptAllocator))
+        return false;
+    /* xnu owns the notifier entries and the send rights; the VM only owns the group. */
+    return hv_io_notifier_grp_alloc(&fIon) == KERN_SUCCESS;
 }
 
 IOReturn com_amdhv_AMDHVVmShared::attach(com_amdhv_AMDHVVm *vcpu, uint32_t *index)
@@ -460,6 +468,7 @@ bool com_amdhv_AMDHVVmShared::guestBytes(uint32_t space, uint64_t gpa, void *dst
     if (table) {
         uint64_t hpa = 0;
         Backing *b = static_cast<Backing *>(table->lookup(gpa, &hpa, nullptr));
+        hpa |= (gpa & 0xFFFull);          /* lookup() returns the 4 KiB leaf base, not the byte address */
         if (b && b->md) {
             const IOByteCount total = b->md->getLength();
             for (IOByteCount cursor = 0; cursor < total;) {

@@ -268,6 +268,16 @@ void testRecordExit()
     f.vmcb.control.nextRip = 0;
     CHECK(f.st.recordExit(1 | 4) && rd(f, 0x4402) == VMX_EPT_VIOLATION && rd(f, 0x2400) == 0x101010);
     CHECK((rd(f, 0x6400) & 7) == 2 && (rd(f, 0x6400) & (1 << 3)) && !(rd(f, 0x6400) & (1 << 4)));
+    /* NPF: nRIP is zero on AMD, so the length comes from VMCB 0xD0 (APM 15.8.4). */
+    f.vmcb.control.insnLen = 7;
+    CHECK(f.st.recordExit(1 | 4) && rd(f, 0x440c) == 7);
+
+    /* Intercepted #PF also fills VMCS_RO_GUEST_LIN_ADDR. */
+    f.vmcb.control.exitCode = 0x40 + 14;
+    f.vmcb.control.exitInfo1 = 2;
+    f.vmcb.control.exitInfo2 = 0xdead000;
+    f.vmcb.control.insnLen = 0;
+    CHECK(f.st.recordExit(0) && rd(f, 0x640a) == 0xdead000);
 
     /* An interrupted event delivery is reported as IDT-vectoring information. */
     f.vmcb.control.exitCode = EXIT_HLT;

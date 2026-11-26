@@ -50,6 +50,7 @@ enum : uint32_t {
     F_RO_IDT_ERROR       = 0x440a,
     F_RO_INSTR_LEN       = 0x440c,
     F_RO_QUALIFICATION   = 0x6400,
+    F_RO_GUEST_LIN_ADDR  = 0x640a,
     F_RO_GUEST_PHYS      = 0x2400,
     F_GUEST_INTERRUPTIBILITY = 0x4824,
     F_GUEST_ACTIVITY     = 0x4826,
@@ -387,6 +388,7 @@ public:
         in.info2 = fVmcb->control.exitInfo2;
         in.rip = fVmcb->save.rip;
         in.nextRip = fVmcb->control.nextRip;
+        in.insnLen = fVmcb->control.insnLen;
         in.nptPerm = nptPerm;
 
         VmxExit out;
@@ -400,6 +402,7 @@ public:
         set(F_RO_IRQ_INFO, out.intrInfo);
         set(F_RO_IRQ_ERROR, out.intrError);
         set(F_RO_GUEST_PHYS, out.gpa);
+        set(F_RO_GUEST_LIN_ADDR, out.guestLinear);
         /* Interrupted event delivery: SVM's EXITINTINFO has the same layout as VMX's IDT-vectoring information. */
         set(F_RO_IDT_INFO, fVmcb->control.exitIntInfo);
         set(F_RO_IDT_ERROR, fVmcb->control.exitIntInfoErr);

@@ -248,6 +248,7 @@ struct SvmExit {
     uint64_t info2;      /* control.exitInfo2 */
     uint64_t rip;        /* save.rip */
     uint64_t nextRip;    /* control.nextRip, 0 when not saved */
+    uint32_t insnLen;    /* VMCB 0xD0: fetched instruction bytes (APM 15.8.4) */
     uint32_t nptPerm;    /* for NPF: rights the faulting page has (npt::PERM_*), 0 when unmapped */
 };
 
@@ -258,6 +259,7 @@ struct VmxExit {
     uint32_t intrInfo;   /* VMCS_RO_VMEXIT_IRQ_INFO */
     uint32_t intrError;  /* VMCS_RO_VMEXIT_IRQ_ERROR */
     uint64_t gpa;        /* VMCS_GUEST_PHYSICAL_ADDRESS, EPT violations */
+    uint64_t guestLinear;/* VMCS_RO_GUEST_LIN_ADDR, intercepted #PF */
 };
 
 /** Exceptions that push an error code: #DF, #TS, #NP, #SS, #GP, #PF, #AC, #CP. */
@@ -280,7 +282,9 @@ static inline bool translateExit(const SvmExit &in, VmxExit *out)
     *out = VmxExit();
     const uint64_t code = in.code;
 
-    out->instrLen = in.nextRip > in.rip ? (uint32_t)(in.nextRip - in.rip) : 0;
+    /* SVM saves nRIP only for instruction intercepts (APM 15.7.1). NPF has none, so use the
+     * fetched-byte count from VMCB 0xD0 that APM 15.8.4 provides for nested page faults. */
+    out->instrLen = in.nextRip > in.rip ? (uint32_t)(in.nextRip - in.rip) : (in.insnLen & 0xF);
 
     /* Control register reads (0x00-0x0F) and writes (0x10-0x1F), debug registers (0x20-0x3F). */
     if (code <= 0x1F || code == 0x65) {
@@ -308,8 +312,10 @@ static inline bool translateExit(const SvmExit &in, VmxExit *out)
             out->intrInfo |= INTR_ERRCODE;
             out->intrError = (uint32_t)in.info1;
         }
-        if (vec == 14)
+        if (vec == 14) {
             out->qual = in.info2;               /* #PF: faulting linear address, like CR2 */
+            out->guestLinear = in.info2;        /* VMCS_RO_GUEST_LIN_ADDR (SDK hv_arch_vmx.h) */
+        }
         return true;
     }
 
@@ -381,7 +387,6 @@ static inline bool translateExit(const SvmExit &in, VmxExit *out)
         if (gpaValid)
             out->qual |= (1u << 7) | (walk ? 0 : (1u << 8));
         out->gpa = gpaValid ? in.info2 : 0;
-        out->instrLen = 0;
         return true;
     }
 

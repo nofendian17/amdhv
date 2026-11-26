@@ -40,6 +40,25 @@ void testPrefix()
     CHECK(op.length == 7);
 }
 
+void testAddressPrefix()
+{
+    /* 66 67 89 05 00 00 C0 FE = MOV [0xFEC00000], EAX in 16-bit real mode:
+     * 66 sets a 32-bit operand, 67 a 32-bit address. */
+    const uint8_t write[] = { 0x66, 0x67, 0x89, 0x05, 0x00, 0x00, 0xC0, 0xFE };
+    amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(write, sizeof(write));
+    CHECK(op.valid);
+    CHECK(op.isWrite);
+    CHECK(op.disp == 0xFEC00000u);
+    CHECK(op.length == 8);
+
+    const uint8_t read[] = { 0x67, 0x66, 0x8B, 0x05, 0x10, 0x00, 0xC0, 0xFE };
+    op = amdhv::apic::decodeMmio(read, sizeof(read));
+    CHECK(op.valid);
+    CHECK(!op.isWrite);
+    CHECK(op.disp == 0xFEC00010u);
+    CHECK(op.length == 8);
+}
+
 void testWrite()
 {
     /* 89 0D 00 03 FE FE = MOV [0xFEE00300], ECX (ICR low). */
@@ -78,6 +97,7 @@ int main()
 {
     testRead();
     testPrefix();
+    testAddressPrefix();
     testWrite();
     testRejectsEverythingElse();
     testOffset();
