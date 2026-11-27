@@ -77,7 +77,7 @@ void ringAppend(const char *line, uint32_t len)
  */
 void vwrite(uint32_t level, bool sync, const char *fmt, va_list ap)
 {
-    if (!sync && level > gLevel)
+    if (!sync && level > __atomic_load_n(&gLevel, __ATOMIC_ACQUIRE))
         return;
     if (level > AMDHV_LOG_TRACE)
         level = AMDHV_LOG_TRACE;
@@ -105,7 +105,7 @@ void vwrite(uint32_t level, bool sync, const char *fmt, va_list ap)
     ringAppend(line, (uint32_t)len);
     OSAddAtomic64(len, (volatile SInt64 *)&gStats.logBytesTotal);
 
-    if (sync || level <= gIoLogLevel)
+    if (sync || level <= __atomic_load_n(&gIoLogLevel, __ATOMIC_ACQUIRE))
         IOLog("AMDHV: %s", line);
 }
 
@@ -124,9 +124,9 @@ void init()
 
     uint32_t v = 0;
     if (PE_parse_boot_argn("amdhv_loglevel", &v, sizeof(v)) && v <= AMDHV_LOG_TRACE)
-        gLevel = v;
+        __atomic_store_n(&gLevel, v, __ATOMIC_RELEASE);
     if (PE_parse_boot_argn("amdhv_iolog", &v, sizeof(v)) && v <= AMDHV_LOG_TRACE)
-        gIoLogLevel = v;
+        __atomic_store_n(&gIoLogLevel, v, __ATOMIC_RELEASE);
 }
 
 /**
@@ -206,7 +206,7 @@ void read(uint64_t cursor, AMDHVLogChunk *out)
 void setLevel(uint32_t level)
 {
     if (level <= AMDHV_LOG_TRACE)
-        gLevel = level;
+        __atomic_store_n(&gLevel, level, __ATOMIC_RELEASE);
 }
 
 /**
@@ -216,7 +216,7 @@ void setLevel(uint32_t level)
  */
 uint32_t level()
 {
-    return gLevel;
+    return __atomic_load_n(&gLevel, __ATOMIC_ACQUIRE);
 }
 
 } // namespace log
