@@ -140,11 +140,11 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             svm::rescan();
             IOLockLock(fLock);
         }
-        if (fKick) {                  /* hv_vcpu_interrupt from another thread */
+        if (__atomic_load_n(&fKick, __ATOMIC_ACQUIRE)) {                  /* hv_vcpu_interrupt from another thread */
             if (injectionWaiting()) {
                 deferrals++;          /* enter first; the flag stays set and ends the run right after the delivery */
             } else {
-                fKick = 0;
+                __atomic_store_n(&fKick, 0, __ATOMIC_RELAXED);
                 timeslice = true;
                 takePendingEvent();
                 break;
@@ -166,8 +166,8 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             explicit NptReadGuard(IORWLock *x) : l(x) { IORWLockRead(l); }
             ~NptReadGuard() { IORWLockUnlock(l); }
         } nptGuard(fShared->rw());
-        if (fKick && !injectionWaiting()) {     /* a kick that came in while we waited for the page tables */
-            fKick = 0;
+        if (__atomic_load_n(&fKick, __ATOMIC_ACQUIRE) && !injectionWaiting()) {     /* a kick that came in while we waited for the page tables */
+            __atomic_store_n(&fKick, 0, __ATOMIC_RELAXED);
             timeslice = true;
             takePendingEvent();
             break;
@@ -181,22 +181,22 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
 
         /* Interrupts off from here until the exit has been looked at. See activeOnAllUsable(). */
         int ints = ml_set_interrupts_enabled(0);
-        fRunCpu = cpu_number();               /* interrupts are off: the thread cannot move before VMRUN */
+        __atomic_store_n(&fRunCpu, cpu_number(), __ATOMIC_RELEASE);               /* interrupts are off: the thread cannot move before VMRUN */
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (fKick && !injectionWaiting()) {   /* a kick that arrived before fRunCpu was visible */
-            fRunCpu = -1;
+        if (__atomic_load_n(&fKick, __ATOMIC_ACQUIRE) && !injectionWaiting()) {   /* a kick that arrived before fRunCpu was visible */
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             continue;
         }
         if (!svm::activeOnAllUsable() && !rescanned) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             rescanned  = true;
             needRescan = true;
             continue;
         }
         if (!svm::activeOnAllUsable()) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             AMDHV_ERR("VmRun: SVM was turned off under us (sleep?), not entering the guest");
             rc = kIOReturnNotReady;
@@ -204,10 +204,10 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         }
 
         /* activeOnAllUsable() counts what enableAll() did; this looks at THIS cpu's EFER, because CLGI without SVME is a #UD panic. */
-        const int runCpu = (int)fRunCpu;
+        const int runCpu = __atomic_load_n(&fRunCpu, __ATOMIC_ACQUIRE);
         const int svmFix = svm::ensureThisCpu();
         if (svmFix == -2 && !rescanned) {     /* this CPU was not online when SVM was switched on */
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             rescanned  = true;
             needRescan = true;
@@ -215,13 +215,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             continue;
         }
         if (svmFix == -3) {                   /* a suspend started between the check and here */
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             rc = kIOReturnNotReady;
             break;
         }
         if (svmFix < 0) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             AMDHV_ERR("VmRun: SVM cannot be used on cpu %d (ensure returned %d), not entering the guest", runCpu, svmFix);
             rc = kIOReturnNotReady;
@@ -253,7 +253,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         const bool wasTs = amdhv::fpu::clearTs();
         const uint64_t hostX = amdhv::fpu::xgetbv0();
         if (guestX & ~hostX) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             amdhv::fpu::restoreTs(wasTs);
             ml_set_interrupts_enabled(ints);
             AMDHV_ERR("VmRun: guest XCR0 0x%llx needs state this thread has not enabled (0x%llx)",
@@ -313,7 +313,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         const uint64_t execStart = mach_absolute_time();
         amdhv_svm_vmrun(&fGprs, fVmcb.pa, fHostVmcb.pa);
         fExecAbs += mach_absolute_time() - execStart;
-        fRunCpu = -1;
+        __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
 
         if (fHasTscAux) {
             fVmcs.setTscAux(amdhv_rdmsr(amdhv::msr::MSR_TSC_AUX));

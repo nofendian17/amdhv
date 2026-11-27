@@ -206,7 +206,7 @@ private:
     amdhv::apic::IoApicState *fApicIoApic;       /* owned by the front end's HvVm */
     AMDHVExitInfo             fExitInfo;         /* pending HV_VM_EXITINFO_* payload for this vCPU */
     uint32_t                  fFpuSize;
-    volatile uint32_t         fKick;
+    uint32_t                  fKick;             /* written by kick() on another thread: atomic builtins only */
     volatile uint32_t         fForceTlbFlush;    /* hv_vcpu_invalidate_tlb asked for a flush */
     uint64_t                  fTlbGenSeen;       /* the tlbGen this vCPU last flushed for */
     uint64_t                  fSleepEpoch;       /* svm::sleepEpoch() this VMCB was last valid for */
@@ -219,7 +219,7 @@ private:
     bool                      fHasPauseThresh;   /* CPUID Fn8000_000A EDX bit 12: advanced pause filter */
     bool                      fAsidMode;         /* amdhv_asid=0: flush on every entry, as before */
     int                       fLastCpu;          /* CPU this vCPU last entered the guest on, -1 = none */
-    volatile int              fRunCpu;           /* CPU inside VMRUN, -1 when none; for kick() */
+    int                       fRunCpu;           /* CPU inside VMRUN, -1 when none; atomic: kick() reads it from another thread */
     amdhv::GuestGprs            fGprs;
     bool                      fFirstRun;
     bool                      fHaveNextRip;
