@@ -86,7 +86,7 @@ inline MmioOp decodeMmioAssist(const uint8_t bytes[15], uint8_t len, uint64_t fa
     if (len == 0 || len > 15)
         return op;
     op = decodeMmio(bytes, len);
-    if (op.valid && (op.length > len || op.disp != faultPa))
+    if (op.valid && op.disp != faultPa)
         op.valid = false;
     return op;
 }
