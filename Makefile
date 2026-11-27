@@ -11,6 +11,11 @@ BUILD := build
 CC    ?= cc
 CXX   ?= c++
 
+# Sanitizer runtimes are linked through an absolute rpath that is baked in at
+# link time. When the CLT/Xcode compiler changes, old binaries can no longer
+# find its runtime, so record the toolchain and rebuild on a change.
+TOOLCHAIN_STAMP := $(BUILD)/.toolchain
+
 WARNINGS := -Wall -Wextra -Werror
 CXXSTD   := -std=c++17
 SANITIZE := -fsanitize=address,undefined -g
@@ -21,12 +26,21 @@ TEST_INC := $(addprefix -I,$(SRC_DIRS))
 
 COV := $(BUILD)/cov
 
-.PHONY: all test tools kext clean coverage amd-info hvf-smoke hvf-probe
+FORCE:
+
+.PHONY: all test tools kext clean coverage amd-info hvf-smoke hvf-probe FORCE
 
 all: tools kext
 
 $(BUILD):
 	mkdir -p $(BUILD)
+
+# Only update the stamp's timestamp when the compiler identity actually changes,
+# so an unchanged toolchain does not trigger a rebuild on every `make` run.
+$(TOOLCHAIN_STAMP): FORCE | $(BUILD)
+	@{ printf 'CC: %s\n' '$(CC)'; $(CC) --version; \
+	   printf 'CXX: %s\n' '$(CXX)'; $(CXX) --version; } > $@.tmp 2>&1
+	@if cmp -s $@.tmp $@; then rm $@.tmp; else mv $@.tmp $@; fi
 
 # Each host test is one binary; this list is the single source of truth.
 # `make test` builds every binary, then runs all of them.
@@ -46,7 +60,7 @@ $(BUILD)/fpu_state_test: TEST_FLAGS := -mavx2 $(SANITIZE)
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do echo $$t; $$t; done
 
-$(TEST_BINS): Makefile
+$(TEST_BINS): Makefile $(TOOLCHAIN_STAMP)
 
 $(BUILD)/host_test: tests/host_test.c | $(BUILD)
 	$(CC) $(WARNINGS) $(TEST_INC) -MMD -MP -o $@ $<
@@ -80,6 +94,8 @@ HV_CFLAGS   := $(TOOL_CFLAGS) -Wno-nullability-completeness
 ENTITLEMENTS := tools/hvf-smoke/hypervisor.entitlements
 
 tools: amd-info hvf-smoke hvf-probe
+
+amd-info hvf-smoke hvf-probe: $(TOOLCHAIN_STAMP)
 
 amd-info: | $(BUILD)
 	$(CC) $(TOOL_CFLAGS) -o $(BUILD)/amd-info tools/amd-info/main.c \
