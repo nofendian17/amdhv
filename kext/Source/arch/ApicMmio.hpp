@@ -67,6 +67,30 @@ inline MmioOp decodeMmio(const uint8_t *code, size_t n)
     return op;
 }
 
+/**
+ * @brief Decode an APIC MOV from the instruction bytes SVM DecodeAssists saved in the VMCB.
+ *
+ * Only `len` of the 15 bytes at +0xD1 are valid. Unlike an NPT lookup at save.rip (a guest LINEAR
+ * address), these bytes work with guest paging enabled, so the in-kernel APIC path can serve the
+ * access instead of handing every MMIO exit to the userspace VMM.
+ *
+ * @param bytes The 15-byte VMCB instruction buffer.
+ * @param len The reported instruction length.
+ * @param faultPa The faulting guest physical address from EXITINFO2.
+ *
+ * @return A valid MmioOp only when the captured instruction really targets `faultPa`.
+ */
+inline MmioOp decodeMmioAssist(const uint8_t bytes[15], uint8_t len, uint64_t faultPa)
+{
+    MmioOp op = { false, false, 0, 0, 0 };
+    if (len == 0 || len > 15)
+        return op;
+    op = decodeMmio(bytes, len);
+    if (op.valid && (op.length > len || op.disp != faultPa))
+        op.valid = false;
+    return op;
+}
+
 /** The register file offset of an APIC MMIO access within its 4 KiB page. */
 inline uint32_t mmioOffset(uint64_t gpa, uint64_t base)
 {

@@ -167,6 +167,7 @@ com_amdhv_AMDHVVm *com_amdhv_AMDHVVm::create(const AMDHVInfo &info, task_t owner
     }
     vm->fHasFlushByAsid = (info.svmFeatures & AMDHV_SVM_FEAT_FLUSH_BY_ASID) != 0;
     vm->fHasVmcbClean   = (info.svmFeatures & AMDHV_SVM_FEAT_VMCB_CLEAN) != 0;
+    vm->fHasDecodeAssists = (info.svmFeatures & AMDHV_SVM_FEAT_DECODE_ASSISTS) != 0;
     vm->fHasPauseFilter = (info.svmFeatures & AMDHV_SVM_FEAT_PAUSE_FILTER) != 0;
     vm->fHasPauseThresh = (info.svmFeatures & AMDHV_SVM_FEAT_PAUSE_THRESH) != 0;
     IOReturn arc = sh->attach(vm, &vm->fIndex);

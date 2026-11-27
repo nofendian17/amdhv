@@ -214,6 +214,7 @@ private:
     volatile uint32_t         fSpace;            /* hv_vm_space_t this vCPU runs in (0 = default) */
     bool                      fHasFlushByAsid;   /* CPUID Fn8000_000A EDX bit 6: TLB_CONTROL 3 is valid */
     bool                      fHasVmcbClean;     /* CPUID Fn8000_000A EDX bit 5: VMCB clean bits are valid */
+    bool                      fHasDecodeAssists; /* CPUID Fn8000_000A EDX bit 7: VMCB 0x0D1 holds the faulting instruction */
     bool                      fHasPauseFilter;   /* CPUID Fn8000_000A EDX bit 10: pause filter count */
     bool                      fHasPauseThresh;   /* CPUID Fn8000_000A EDX bit 12: advanced pause filter */
     bool                      fAsidMode;         /* amdhv_asid=0: flush on every entry, as before */
