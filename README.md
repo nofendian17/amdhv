@@ -115,6 +115,7 @@ Everything else is on by default or diagnostics only. Do not add more unless tro
 | `amdhv_apic=1` | optional — accepts `hv_vm_create(HV_VM_ACCEL_APIC)` and enables the in-kernel APIC path (default: off) |
 | `amdhv_asid=0` | optional — disables per-vCPU ASIDs and uses ASID 0 with full TLB flushes (default: on) |
 | `amdhv_selftest=1` | diagnostics — verify SVM state after enable and after wake |
+| `amdhv_fpu_check=1` | diagnostics — compare the host FPU state after every VM exit (extra XSAVE; default: off) |
 | `amdhv_loglevel=N` / `amdhv_iolog=N` | diagnostics — log levels, also settable with `amd-info level N` |
 | `-amdhv_off` | **emergency** — kext loads but does nothing |
 
