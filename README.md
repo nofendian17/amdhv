@@ -151,7 +151,10 @@ processes can each run a VM, but several at once are less tested than a single o
 - Verified on this rewrite: **Zen 2** (Matisse, Ryzen 5 3600) with macOS Sequoia — `hvf-smoke`,
   `amd-info`, VZ/Docker (Kiri, Docker Desktop), VirtualBox and the Android emulator all work. The
   ported core was additionally tested on a Ryzen 7 5800H by the original RyzenHV project. Re-test
-  on yours with `hvf-smoke` and `./build/hvf-probe`.
+  on yours with `hvf-smoke` and `./build/hvf-probe`. Also verified on **macOS 26.7.3 (Tahoe, SDK
+  26.5)**: `make test` 22/22, `hvf-smoke` PASS, `hvf-probe --matrix` 79/79 and `amd-info
+  selftest` 12/12 with the 0.5.0 kext loaded; the x86 Hypervisor.framework surface is unchanged
+  from the 15.x SDK.
 
 ## Sources
 
