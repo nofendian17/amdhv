@@ -1118,6 +1118,10 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
      * present the highest priority vector through the VM-entry event-injection field. The core's
      * applyControls() turns that field into VMCB.eventInj; existing client injections win. */
     if (v->vm->apicAccel) {
+        /* Task traps 10/11 deliver IRQs into these same models, so serialize the whole APIC feed
+         * with them. The lock is dropped before runEx() takes the core's fLock; the order here is
+         * vm->lock -> fLock, the same as tVmSyncTsc's vm->lock -> tscLock -> fLock. */
+        IOLockLock(v->vm->lock);
         if (v->id == 0) {
             for (unsigned p = 0; p < 2; p++) {
                 const unsigned vec = amdhv::apic::atpicPending(v->vm->atpic[p]);
@@ -1135,6 +1139,7 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
             if (vec)
                 cpu->vmcsWrite(0x4016, (1ull << 31) | vec);  /* external interrupt, no error code */
         }
+        IOLockUnlock(v->vm->lock);
     }
 
     /* 2. Run. */
@@ -1537,31 +1542,35 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
     const unsigned op = (unsigned)x.op & 0xFFFF;
     amdhv::apic::AtpicState &pic = vm->atpic[(x.a >> 32) & 1];
     const unsigned irq = (unsigned)x.a & 0xFF;
+    /* vcpuRun() feeds these same models into the per-vCPU LAPIC, so every read and write of the
+     * VM-wide APIC state has to be serialized here. One lock around the switch keeps it simple;
+     * IOLock is a sleeping mutex, so copyin/copyout while holding it is fine. */
+    IOLockLock(vm->lock);
+    auto fail = [&]() -> kern_return_t { IOLockUnlock(vm->lock); vmUnpin(vm); return kHvError; };
     switch (op) {
     case 0x74: if (irq < 8 && !(pic.mask & (1u << irq))) pic.request |= 1u << irq; break;
     case 0x75: if (irq < 8) pic.request &= ~(1u << irq); break;
-    case 0x76: { uint8_t m = pic.mask; if (copyout(&m, (user_addr_t)x.b, 1)) { vmUnpin(vm); return kHvError; } break; }
+    case 0x76: { uint8_t m = pic.mask; if (copyout(&m, (user_addr_t)x.b, 1)) return fail(); break; }
     case 0x77: pic.mask = (uint8_t)(x.a >> 32); break;
     case 0x78: { uint32_t ver = 100;   /* HV_ATPIC_STATE_EXT_VER */
-                 if (copyout(&ver, (user_addr_t)x.b, 4) || copyout(&pic, (user_addr_t)x.b + 4, sizeof(pic))) { vmUnpin(vm); return kHvError; } break; }
-    case 0x79: if (copyin((user_addr_t)x.b + 4, &pic, sizeof(pic))) { vmUnpin(vm); return kHvError; } break;
+                 if (copyout(&ver, (user_addr_t)x.b, 4) || copyout(&pic, (user_addr_t)x.b + 4, sizeof(pic))) return fail(); break; }
+    case 0x79: if (copyin((user_addr_t)x.b + 4, &pic, sizeof(pic))) return fail(); break;
     case 0x6b: amdhv::apic::assertIrq(vm->ioapic, irq); break;
     case 0x6c: amdhv::apic::deassertIrq(vm->ioapic, irq); break;
     case 0x6d: amdhv::apic::assertIrq(vm->ioapic, irq); amdhv::apic::deassertIrq(vm->ioapic, irq); break;
     case 0x6f: { uint32_t v = amdhv::apic::ioRead(vm->ioapic, vm->ioapic.ioregsel);
-                 if (copyout(&v, (user_addr_t)x.b, 4)) { vmUnpin(vm); return kHvError; } break; }
+                 if (copyout(&v, (user_addr_t)x.b, 4)) return fail(); break; }
     case 0x70: amdhv::apic::ioWrite(vm->ioapic, vm->ioapic.ioregsel, (uint32_t)x.b); break;
     case 0x71: { uint32_t ver = 100;   /* HV_IOAPIC_STATE_EXT_VER */
                   /* the state pointer is in a; b is a framework cookie; state begins at +8 */
-                  if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
-    case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break;
+                  if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) return fail(); break; }
+    case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) return fail(); break;
     /* hv_vm_send_ioapic_intr(data): Apple documents data as an IOAPIC redirection table entry
      * (vector 7:0, mask 16, destination 63:56). Deliver to that LAPIC, or to all for 0xff. */
     case 0x73: {
         const amdhv::apic::IoapicIntrWire w = amdhv::apic::decodeIoapicIntr(x.a);
         if (!w.valid)
             break;
-        IOLockLock(vm->lock);
         for (unsigned id = 0; id < kMaxVcpus; id++) {
             HvVcpu *target = vm->vcpu[id];
             if (!target || !target->cpu)
@@ -1570,7 +1579,6 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
                 continue;
             amdhv::apic::setIrr(target->lapic, w.vector);
         }
-        IOLockUnlock(vm->lock);
         break;
     }
     /* hv_vm_lapic_set_intr(vcpu, vector, trigger): a carries the vCPU id in its low half and the
@@ -1580,16 +1588,15 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
         const amdhv::apic::LapicIntrWire w = amdhv::apic::decodeLapicIntr(x.a, x.b);
         if (w.vcpu >= kMaxVcpus)
             break;
-        IOLockLock(vm->lock);
         HvVcpu *target = vm->vcpu[w.vcpu];
         if (target && target->cpu)
             amdhv::apic::setIrr(target->lapic, w.vector);
-        IOLockUnlock(vm->lock);
         break;
     }
     case 0x7a: break;                       /* APIC bus frequency: no timer emulation yet */
-    default: vmUnpin(vm); return kHvUnsupportedCode;
+    default: IOLockUnlock(vm->lock); vmUnpin(vm); return kHvUnsupportedCode;
     }
+    IOLockUnlock(vm->lock);
     vmUnpin(vm);
     return kHvOk;
 }
