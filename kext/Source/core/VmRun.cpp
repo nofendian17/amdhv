@@ -140,11 +140,11 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             svm::rescan();
             IOLockLock(fLock);
         }
-        if (fKick) {                  /* hv_vcpu_interrupt from another thread */
+        if (__atomic_load_n(&fKick, __ATOMIC_ACQUIRE)) {                  /* hv_vcpu_interrupt from another thread */
             if (injectionWaiting()) {
                 deferrals++;          /* enter first; the flag stays set and ends the run right after the delivery */
             } else {
-                fKick = 0;
+                __atomic_store_n(&fKick, 0, __ATOMIC_RELAXED);
                 timeslice = true;
                 takePendingEvent();
                 break;
@@ -166,8 +166,8 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             explicit NptReadGuard(IORWLock *x) : l(x) { IORWLockRead(l); }
             ~NptReadGuard() { IORWLockUnlock(l); }
         } nptGuard(fShared->rw());
-        if (fKick && !injectionWaiting()) {     /* a kick that came in while we waited for the page tables */
-            fKick = 0;
+        if (__atomic_load_n(&fKick, __ATOMIC_ACQUIRE) && !injectionWaiting()) {     /* a kick that came in while we waited for the page tables */
+            __atomic_store_n(&fKick, 0, __ATOMIC_RELAXED);
             timeslice = true;
             takePendingEvent();
             break;
@@ -181,22 +181,22 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
 
         /* Interrupts off from here until the exit has been looked at. See activeOnAllUsable(). */
         int ints = ml_set_interrupts_enabled(0);
-        fRunCpu = cpu_number();               /* interrupts are off: the thread cannot move before VMRUN */
+        __atomic_store_n(&fRunCpu, cpu_number(), __ATOMIC_RELEASE);               /* interrupts are off: the thread cannot move before VMRUN */
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (fKick && !injectionWaiting()) {   /* a kick that arrived before fRunCpu was visible */
-            fRunCpu = -1;
+        if (__atomic_load_n(&fKick, __ATOMIC_ACQUIRE) && !injectionWaiting()) {   /* a kick that arrived before fRunCpu was visible */
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             continue;
         }
         if (!svm::activeOnAllUsable() && !rescanned) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             rescanned  = true;
             needRescan = true;
             continue;
         }
         if (!svm::activeOnAllUsable()) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             AMDHV_ERR("VmRun: SVM was turned off under us (sleep?), not entering the guest");
             rc = kIOReturnNotReady;
@@ -204,10 +204,10 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         }
 
         /* activeOnAllUsable() counts what enableAll() did; this looks at THIS cpu's EFER, because CLGI without SVME is a #UD panic. */
-        const int runCpu = (int)fRunCpu;
+        const int runCpu = __atomic_load_n(&fRunCpu, __ATOMIC_ACQUIRE);
         const int svmFix = svm::ensureThisCpu();
         if (svmFix == -2 && !rescanned) {     /* this CPU was not online when SVM was switched on */
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             rescanned  = true;
             needRescan = true;
@@ -215,13 +215,13 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
             continue;
         }
         if (svmFix == -3) {                   /* a suspend started between the check and here */
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             rc = kIOReturnNotReady;
             break;
         }
         if (svmFix < 0) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             ml_set_interrupts_enabled(ints);
             AMDHV_ERR("VmRun: SVM cannot be used on cpu %d (ensure returned %d), not entering the guest", runCpu, svmFix);
             rc = kIOReturnNotReady;
@@ -253,7 +253,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         const bool wasTs = amdhv::fpu::clearTs();
         const uint64_t hostX = amdhv::fpu::xgetbv0();
         if (guestX & ~hostX) {
-            fRunCpu = -1;
+            __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
             amdhv::fpu::restoreTs(wasTs);
             ml_set_interrupts_enabled(ints);
             AMDHV_ERR("VmRun: guest XCR0 0x%llx needs state this thread has not enabled (0x%llx)",
@@ -313,7 +313,7 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         const uint64_t execStart = mach_absolute_time();
         amdhv_svm_vmrun(&fGprs, fVmcb.pa, fHostVmcb.pa);
         fExecAbs += mach_absolute_time() - execStart;
-        fRunCpu = -1;
+        __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELEASE);
 
         if (fHasTscAux) {
             fVmcs.setTscAux(amdhv_rdmsr(amdhv::msr::MSR_TSC_AUX));
@@ -330,10 +330,16 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         if (guestX != hostX)
             amdhv::fpu::xsetbv0(hostX);
         amdhv::fpu::xrstor(fHostFpu.va, hostX);
-        /* Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own). */
-        amdhv::fpu::xsave(fScratchFpu.va, hostX);
-        if (!amdhv::fpu::legacyEqual((const uint8_t *)fHostFpu.va, (const uint8_t *)fScratchFpu.va))
-            AMDHV_STAT_INC(vmFpuMismatches);
+        /*
+         * Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own).
+         * This is a diagnostic, not part of the swap: it costs a second XSAVE and a 512-byte compare on
+         * every exit. Keep it opt-in (amdhv_fpu_check=1); the state swap above runs either way.
+         */
+        if (amdhv::hv::fpuCheck()) {
+            amdhv::fpu::xsave(fScratchFpu.va, hostX);
+            if (!amdhv::fpu::legacyEqual((const uint8_t *)fHostFpu.va, (const uint8_t *)fScratchFpu.va))
+                AMDHV_STAT_INC(vmFpuMismatches);
+        }
         amdhv::fpu::restoreTs(wasTs);
 
         __asm__ volatile("movq %0, %%cr2" : : "r"(hostCr2));
@@ -382,92 +388,100 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
          * (0xFEC00000) pages from the models when the page is not mapped. Only act when the decoded
          * address equals the faulting GPA; anything else still goes to the userspace VMM.
          */
-        /* guestBytes() looks up its argument in the NPT, i.e. it needs a guest PHYSICAL address.
-         * VMCB save.rip is guest LINEAR; with guest paging on they differ, so let the userspace
-         * VMM decode the faulting instruction instead of serving bytes from an unrelated page. */
+        /* With DecodeAssists the VMCB carries the faulting instruction bytes, independent of guest
+         * paging. Without it, guestBytes() needs a guest PHYSICAL address while save.rip is guest
+         * LINEAR; with paging on they differ, so leave decoding to the userspace VMM. KVM makes the
+         * same choice in svm_handle_page_fault() (insn_bytes vs. decoding from guest memory). */
         const bool guestPaging = (v->save.cr0 & AMDHV_CR0_PG) != 0;
-        if (!guestPaging && fApicAccel && fApicLapic && code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1)) {
+        if (fApicAccel && fApicLapic && code == EXIT_NPF && amdhv_npf_gpa_valid(v->control.exitInfo1)) {
             const uint64_t fault = v->control.exitInfo2;
             const uint32_t offL = amdhv::apic::mmioOffset(fault, 0xFEE00000ull);
             const uint32_t offI = fApicIoApic ? amdhv::apic::mmioOffset(fault, 0xFEC00000ull) : 0xFFFFFFFFu;
             const bool lapic = offL != 0xFFFFFFFFu;
             const bool ioapic = offI != 0xFFFFFFFFu;
             if (lapic || ioapic) {
-                uint8_t insn[8] = {0};   /* 66 + 67 + opcode + modrm + disp32 */
-                if (fShared->guestBytes(fSpace, v->save.rip, insn, sizeof(insn))) {
-                    const amdhv::apic::MmioOp op = amdhv::apic::decodeMmio(insn, sizeof(insn));
-                    if (op.valid && op.disp == fault) {
-                        uint64_t rax = v->save.rax;   /* VMCB.Save is packed: never take its address */
-                        uint64_t *reg = op.reg == 0 ? &rax : nullptr;
-                        switch (op.reg) {
-                        case 1: reg = &fGprs.rcx;  break;
-                        case 2: reg = &fGprs.rdx;  break;
-                        case 3: reg = &fGprs.rbx;  break;
-                        case 5: reg = &fGprs.rbp;  break;
-                        case 6: reg = &fGprs.rsi;  break;
-                        case 7: reg = &fGprs.rdi;  break;
-                        default: break;              /* RSP: never used for APIC registers */
-                        }
-                        /* An illegal APIC access is reported as #GP through AMDHV_EXITINFO_INJECT_EXCP. */
-                        AMDHVExitInfo xi = {};
-                        xi.code = AMDHV_EXITINFO_INJECT_EXCP;
-                        xi.value = 13;                 /* #GP */
-                        xi.valid = 1;
-                        bool served = false;
-                        if (reg) {
-                            if (lapic) {
-                                if (op.isWrite) {
-                                    const uint32_t val = (uint32_t)*reg;
-                                    if (offL == 0x300) {          /* ICR: INIT/SIPI are published to the client */
-                                        const unsigned dm = (val >> 8) & 7;
-                                        if (dm == 3 || dm == 6) {
-                                            xi.code = dm == 3 ? AMDHV_EXITINFO_INIT_AP : AMDHV_EXITINFO_STARTUP_AP;
-                                            xi.bitmap = 1ull << (val & 0xFF);
-                                            if (dm == 6)
-                                                xi.rip = (uint64_t)(val & 0xFF) << 12;
-                                        }
-                                    } else if (offL == 0xB0) {    /* EOI: vector of the interrupt retired */
-                                        xi.code = AMDHV_EXITINFO_IOAPIC_EOI;
-                                        xi.value = amdhv::apic::highestIsrVector(*fApicLapic);
+                amdhv::apic::MmioOp op = { false, false, 0, 0, 0 };
+                if (fHasDecodeAssists && v->control.insnLen) {
+                    op = amdhv::apic::decodeMmioAssist(v->control.insnBytes, v->control.insnLen, fault);
+                } else if (!guestPaging) {
+                    uint8_t insn[8] = {0};   /* 66 + 67 + opcode + modrm + disp32 */
+                    if (fShared->guestBytes(fSpace, v->save.rip, insn, sizeof(insn))) {
+                        op = amdhv::apic::decodeMmio(insn, sizeof(insn));
+                        if (op.disp != fault)
+                            op.valid = false;
+                    }
+                }
+                if (op.valid) {
+                    uint64_t rax = v->save.rax;   /* VMCB.Save is packed: never take its address */
+                    uint64_t *reg = op.reg == 0 ? &rax : nullptr;
+                    switch (op.reg) {
+                    case 1: reg = &fGprs.rcx;  break;
+                    case 2: reg = &fGprs.rdx;  break;
+                    case 3: reg = &fGprs.rbx;  break;
+                    case 5: reg = &fGprs.rbp;  break;
+                    case 6: reg = &fGprs.rsi;  break;
+                    case 7: reg = &fGprs.rdi;  break;
+                    default: break;              /* RSP: never used for APIC registers */
+                    }
+                    /* An illegal APIC access is reported as #GP through AMDHV_EXITINFO_INJECT_EXCP. */
+                    AMDHVExitInfo xi = {};
+                    xi.code = AMDHV_EXITINFO_INJECT_EXCP;
+                    xi.value = 13;                 /* #GP */
+                    xi.valid = 1;
+                    bool served = false;
+                    if (reg) {
+                        if (lapic) {
+                            if (op.isWrite) {
+                                const uint32_t val = (uint32_t)*reg;
+                                if (offL == 0x300) {          /* ICR: INIT/SIPI are published to the client */
+                                    const unsigned dm = (val >> 8) & 7;
+                                    if (dm == 3 || dm == 6) {
+                                        xi.code = dm == 3 ? AMDHV_EXITINFO_INIT_AP : AMDHV_EXITINFO_STARTUP_AP;
+                                        xi.bitmap = 1ull << (val & 0xFF);
+                                        if (dm == 6)
+                                            xi.rip = (uint64_t)(val & 0xFF) << 12;
                                     }
-                                    amdhv::apic::writeReg(*fApicLapic, offL, val);
-                                } else {
-                                    xi.code = AMDHV_EXITINFO_APIC_ACCESS_READ;
-                                    xi.value = amdhv::apic::readReg(*fApicLapic, offL);
-                                    *reg = xi.value;
+                                } else if (offL == 0xB0) {    /* EOI: vector of the interrupt retired */
+                                    xi.code = AMDHV_EXITINFO_IOAPIC_EOI;
+                                    xi.value = amdhv::apic::highestIsrVector(*fApicLapic);
                                 }
-                                served = true;
-                            } else if (offI == 0 || offI == 0x10) {
-                                /* IOREGSEL at +0, IOWIN at +0x10. */
-                                if (op.isWrite) {
-                                    if (offI == 0)
-                                        fApicIoApic->ioregsel = (uint32_t)*reg & 0xFF;
-                                    else {
-                                        if (fApicIoApic->ioregsel == 0x10) {
-                                            xi.code = AMDHV_EXITINFO_IOAPIC_EOI;
-                                            xi.value = (uint8_t)*reg;
-                                        }
-                                        amdhv::apic::ioWrite(*fApicIoApic, fApicIoApic->ioregsel, (uint32_t)*reg);
-                                    }
-                                } else {
-                                    *reg = offI == 0 ? fApicIoApic->ioregsel
-                                                     : amdhv::apic::ioRead(*fApicIoApic, fApicIoApic->ioregsel);
-                                    if (offI == 0x10) {
-                                        xi.code = AMDHV_EXITINFO_APIC_ACCESS_READ;
-                                        xi.value = (uint32_t)*reg;
-                                    }
-                                }
-                                served = true;
+                                amdhv::apic::writeReg(*fApicLapic, offL, val);
+                            } else {
+                                xi.code = AMDHV_EXITINFO_APIC_ACCESS_READ;
+                                xi.value = amdhv::apic::readReg(*fApicLapic, offL);
+                                *reg = xi.value;
                             }
+                            served = true;
+                        } else if (offI == 0 || offI == 0x10) {
+                            /* IOREGSEL at +0, IOWIN at +0x10. */
+                            if (op.isWrite) {
+                                if (offI == 0)
+                                    fApicIoApic->ioregsel = (uint32_t)*reg & 0xFF;
+                                else {
+                                    if (fApicIoApic->ioregsel == 0x10) {
+                                        xi.code = AMDHV_EXITINFO_IOAPIC_EOI;
+                                        xi.value = (uint8_t)*reg;
+                                    }
+                                    amdhv::apic::ioWrite(*fApicIoApic, fApicIoApic->ioregsel, (uint32_t)*reg);
+                                }
+                            } else {
+                                *reg = offI == 0 ? fApicIoApic->ioregsel
+                                                 : amdhv::apic::ioRead(*fApicIoApic, fApicIoApic->ioregsel);
+                                if (offI == 0x10) {
+                                    xi.code = AMDHV_EXITINFO_APIC_ACCESS_READ;
+                                    xi.value = (uint32_t)*reg;
+                                }
+                            }
+                            served = true;
                         }
-                        setApicExitInfo(xi);
-                        if (served) {
-                            if (op.reg == 0)
-                                v->save.rax = rax;
-                            v->save.rip += op.length;
-                            fHaveNextRip = false;
-                            continue;
-                        }
+                    }
+                    setApicExitInfo(xi);
+                    if (served) {
+                        if (op.reg == 0)
+                            v->save.rax = rax;
+                        v->save.rip += op.length;
+                        fHaveNextRip = false;
+                        continue;
                     }
                 }
             }

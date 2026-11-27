@@ -170,7 +170,7 @@ void enableAction(void *)
     amdhv_wrmsr(AMDHV_MSR_VM_HSAVE_PA, gHostSavePa[cpu]);
 
     gOn[cpu] = 1;
-    OSIncrementAtomic(&gActive);
+    __atomic_fetch_add(&gActive, 1, __ATOMIC_ACQ_REL);
 }
 
 /**
@@ -330,7 +330,7 @@ void probe(AMDHVInfo *out, bool readMsrs)
     out->numAsids          = p.numAsids;
     out->svmFeatures       = p.features;
     out->nCpusSvmUsable    = usableCount();
-    out->nCpusSvmActive    = (uint32_t)gActive;
+    out->nCpusSvmActive    = __atomic_load_n(&gActive, __ATOMIC_ACQUIRE);
 
     for (uint32_t i = 0; i < gNCpus; i++) {
         const CpuProbe &c = gProbe[i];
@@ -350,7 +350,7 @@ uint32_t enableAll()
 {
     AMDHV_STAT_INC(enableCalls);
 
-    const uint32_t before = (uint32_t)gActive;
+    const uint32_t before = __atomic_load_n(&gActive, __ATOMIC_ACQUIRE);
     if (before && before == usableCount())
         return before;                 /* fully enabled, nothing to retry */
 
@@ -368,7 +368,7 @@ uint32_t enableAll()
 
     mp_rendezvous_no_intrs(enableAction, nullptr);
 
-    uint32_t active = (uint32_t)gActive;
+    uint32_t active = __atomic_load_n(&gActive, __ATOMIC_ACQUIRE);
     AMDHV_STAT_ADD(enableCpusOk, active - before);   /* CPUs added by this call, not a recount */
     if (active != usableCount()) {
         AMDHV_ERR("enableAll: only %u of %u CPUs took the enable path", active, usableCount());
@@ -392,10 +392,10 @@ void disableAll()
      * into a host save page that freeHostSave() is about to release. */
     __atomic_store_n(&gStopping, true, __ATOMIC_SEQ_CST);
 
-    if (gActive) {
+    if (__atomic_load_n(&gActive, __ATOMIC_ACQUIRE)) {
         AMDHV_SYNC("disabling SVM on all CPUs");
         mp_rendezvous_no_intrs(disableAction, nullptr);
-        gActive = 0;
+        __atomic_store_n(&gActive, 0, __ATOMIC_RELEASE);
     }
     bzero(gOn, sizeof(gOn));
     gWantEnabled = false;
@@ -411,7 +411,7 @@ void noteSuspend()
 {
     /* Probe-only and stopped kexts have nothing to tear down. Without this guard a suspend would
      * set the flag and resume() would enable SVM on a machine that never asked for it. */
-    if (!gWantEnabled && gActive == 0)
+    if (!gWantEnabled && __atomic_load_n(&gActive, __ATOMIC_ACQUIRE) == 0)
         return;
     amdhv::svm::beginSuspend(gSuspended, gSleepEpoch);
 }
@@ -443,12 +443,12 @@ void suspend()
      * ensureThisCpu() must see the suspend and leave EFER.SVME alone. */
     noteSuspend();
 
-    if (!gActive)
+    if (!__atomic_load_n(&gActive, __ATOMIC_ACQUIRE))
         return;
 
     AMDHV_SYNC("sleep: turning SVM off, host save areas are kept");
     mp_rendezvous_no_intrs(disableAction, nullptr);
-    gActive    = 0;
+    __atomic_store_n(&gActive, 0, __ATOMIC_RELEASE);
     bzero(gOn, sizeof(gOn));
 }
 
@@ -469,11 +469,11 @@ uint32_t resume()
     }
 
     AMDHV_SYNC("wake: turning SVM back on");
-    gActive    = 0;
+    __atomic_store_n(&gActive, 0, __ATOMIC_RELEASE);
     bzero(gOn, sizeof(gOn));
     mp_rendezvous_no_intrs(enableAction, nullptr);
 
-    uint32_t active = (uint32_t)gActive;
+    uint32_t active = __atomic_load_n(&gActive, __ATOMIC_ACQUIRE);
     /* Clear "suspended" even when the re-enable was partial: rescan() can finish it, and
      * activeOnAllUsable() still refuses to run a guest until every usable CPU is back. */
     amdhv::svm::endResume(gSuspended, gSleepEpoch);
@@ -497,7 +497,7 @@ bool verifyAll(uint32_t *ok, uint32_t *total)
 {
     *ok = 0;
     *total = 0;
-    if (!gActive) {
+    if (!__atomic_load_n(&gActive, __ATOMIC_ACQUIRE)) {
         AMDHV_WARN("selftest: SVM is not active, nothing to verify");
         return false;
     }
@@ -537,7 +537,7 @@ bool verifyAll(uint32_t *ok, uint32_t *total)
  */
 uint32_t activeCpuCount()
 {
-    return (uint32_t)gActive;
+    return __atomic_load_n(&gActive, __ATOMIC_ACQUIRE);
 }
 
 /**
@@ -548,7 +548,7 @@ uint32_t activeCpuCount()
 bool activeOnAllUsable()
 {
     return canEnterGuest(__atomic_load_n(&gSuspended, __ATOMIC_ACQUIRE) ||
-                         __atomic_load_n(&gStopping, __ATOMIC_ACQUIRE), (uint32_t)gActive, usableCount());
+                         __atomic_load_n(&gStopping, __ATOMIC_ACQUIRE), __atomic_load_n(&gActive, __ATOMIC_ACQUIRE), usableCount());
 }
 
 /**
@@ -587,7 +587,7 @@ int ensureThisCpu()
      * them here but the counters stayed behind, so activeOnAllUsable() and the stats would lie. Keep them in sync. */
     if (!gOn[cpu]) {
         gOn[cpu] = 1;
-        OSIncrementAtomic(&gActive);
+        __atomic_fetch_add(&gActive, 1, __ATOMIC_ACQ_REL);
     }
     OSIncrementAtomic(&gHealed);
     return 1;
@@ -665,11 +665,11 @@ uint32_t rescan()
                 need = true;
         }
         if (need) {
-            int before = (int)gActive;
+            int before = (int)__atomic_load_n(&gActive, __ATOMIC_ACQUIRE);
             AMDHV_SYNC("rescan: enabling SVM on the CPUs that came up late");
             mp_rendezvous_no_intrs(enableAction, nullptr);
-            enabled = (uint32_t)((int)gActive - before);
-            AMDHV_INFO("rescan: SVM now on %d of %u CPUs", (int)gActive, usableCount());
+            enabled = (uint32_t)((int)__atomic_load_n(&gActive, __ATOMIC_ACQUIRE) - before);
+            AMDHV_INFO("rescan: SVM now on %d of %u CPUs", (int)__atomic_load_n(&gActive, __ATOMIC_ACQUIRE), usableCount());
         }
     }
 

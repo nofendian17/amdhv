@@ -167,6 +167,7 @@ com_amdhv_AMDHVVm *com_amdhv_AMDHVVm::create(const AMDHVInfo &info, task_t owner
     }
     vm->fHasFlushByAsid = (info.svmFeatures & AMDHV_SVM_FEAT_FLUSH_BY_ASID) != 0;
     vm->fHasVmcbClean   = (info.svmFeatures & AMDHV_SVM_FEAT_VMCB_CLEAN) != 0;
+    vm->fHasDecodeAssists = (info.svmFeatures & AMDHV_SVM_FEAT_DECODE_ASSISTS) != 0;
     vm->fHasPauseFilter = (info.svmFeatures & AMDHV_SVM_FEAT_PAUSE_FILTER) != 0;
     vm->fHasPauseThresh = (info.svmFeatures & AMDHV_SVM_FEAT_PAUSE_THRESH) != 0;
     IOReturn arc = sh->attach(vm, &vm->fIndex);
@@ -209,7 +210,7 @@ bool com_amdhv_AMDHVVm::init()
     fGuestXcr0     = amdhv::fpu::XCR0_X87;
     fXcr0Supported = 0;
     fFpuSize       = 0;
-    fKick          = 0;
+    __atomic_store_n(&fKick, 0, __ATOMIC_RELAXED);
     fHasTscAux     = false;
     fTscNative     = false;
     fApicAccel     = false;
@@ -228,7 +229,7 @@ bool com_amdhv_AMDHVVm::init()
         PE_parse_boot_argn("amdhv_asid", &asidMode, sizeof(asidMode));
         fAsidMode = asidMode != 0;
     }
-    fRunCpu        = -1;
+    __atomic_store_n(&fRunCpu, -1, __ATOMIC_RELAXED);
     fFirstRun    = true;
     fHaveNextRip = false;
     fExecAbs     = 0;
@@ -502,9 +503,9 @@ static void kickAction(void *)
 
 void com_amdhv_AMDHVVm::kick()
 {
-    fKick = 1;
+    __atomic_store_n(&fKick, 1, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    int cpu = fRunCpu;
+    int cpu = __atomic_load_n(&fRunCpu, __ATOMIC_ACQUIRE);
     if (cpu >= 0 && cpu < 64 && __sync_bool_compare_and_swap(&gKickInFlight[cpu], 0, 1))
         mp_cpus_call(1ull << cpu, 2 /* NOSYNC */, kickAction, nullptr);
 }

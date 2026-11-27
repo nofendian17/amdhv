@@ -5,6 +5,26 @@ semantic versioning. The `v*` git tag is the release version: `kext/Makefile` st
 built `Info.plist`. The value committed in `kext/Info.plist` is only a fallback for source archives
 made with `git archive`, which have no tag metadata.
 
+## [0.5.0] — 2026-11-27
+
+### Added
+- SVM DecodeAssists now supplies the faulting instruction bytes for in-kernel APIC MMIO emulation.
+  The APIC path therefore also works when guest paging is enabled; CPUs without DecodeAssists keep
+  the previous fallback.
+
+### Changed
+- The FPU round-trip self-check is now opt-in via `amdhv_fpu_check=1` (default off). It previously
+  added an extra XSAVE and a 512-byte compare to every VM exit; the host/guest FPU swap itself is
+  unchanged.
+
+### Fixed
+- APIC model state is serialized between task traps 10/11 and `vcpuRun()` with `vm->lock`. The
+  unsynchronized read-modify-write on LAPIC IRR/ISR and the IOAPIC/ATPIC models could lose or
+  duplicate an interrupt.
+- `fKick`, `fRunCpu` and the runtime-writable globals (`gTprShadow`, `gMode`, `gRegistered`,
+  `gLevel`, `gIoLogLevel`, `gActive`) now use atomic accesses instead of plain `volatile`.
+- Removed a redundant instruction-length check in the DecodeAssists decoder.
+
 ## [0.4.0] — 2026-11-26
 
 ### Added

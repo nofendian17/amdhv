@@ -140,6 +140,9 @@ volatile SInt32 gLiveVms = 0;
  * a Windows boot. On by default; the boot-arg amdhv_tpr_shadow=0 or `amd-info hv tpr 0` turns it off for the VMs created from then on. */
 volatile int gTprShadow = 1;
 volatile int gApicAccel = 0;                           /* amdhv_apic=1: let clients ask for hv_vm_create(HV_VM_ACCEL_APIC) */
+/* amdhv_fpu_check=1: keep the extra XSAVE + legacy-state compare after every VMRUN. Diagnostic only;
+ * the state swap itself is unchanged, so the check is off by default to keep the exit path cheap. */
+volatile int gFpuCheck = 0;
 
 volatile int *gSupportPtr = nullptr;                 /* the kernel's hv_support_available once located and written */
 int gSupportSaved = 0;
@@ -344,7 +347,7 @@ HvVm *vmCreate(uint64_t *info, IOReturn *err)
     info[0x20 / 8] = 0x1000;
     uint64_t caps[amdhv::vmx::CAP_COUNT];
     for (unsigned c = 0; c < amdhv::vmx::CAP_COUNT; c++)
-        caps[c] = amdhv::vmx::capability(c, gTprShadow != 0);
+        caps[c] = amdhv::vmx::capability(c, __atomic_load_n(&gTprShadow, __ATOMIC_ACQUIRE) != 0);
     for (unsigned c = 0; c < amdhv::vmx::CAP_COUNT; c++) {
         info[(0x28 + 8 * c) / 8] = caps[c];
         vm->caps[c] = caps[c];
@@ -1115,6 +1118,10 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
      * present the highest priority vector through the VM-entry event-injection field. The core's
      * applyControls() turns that field into VMCB.eventInj; existing client injections win. */
     if (v->vm->apicAccel) {
+        /* Task traps 10/11 deliver IRQs into these same models, so serialize the whole APIC feed
+         * with them. The lock is dropped before runEx() takes the core's fLock; the order here is
+         * vm->lock -> fLock, the same as tVmSyncTsc's vm->lock -> tscLock -> fLock. */
+        IOLockLock(v->vm->lock);
         if (v->id == 0) {
             for (unsigned p = 0; p < 2; p++) {
                 const unsigned vec = amdhv::apic::atpicPending(v->vm->atpic[p]);
@@ -1132,6 +1139,7 @@ static kern_return_t vcpuRun(void *target, uint64_t deadline)
             if (vec)
                 cpu->vmcsWrite(0x4016, (1ull << 31) | vec);  /* external interrupt, no error code */
         }
+        IOLockUnlock(v->vm->lock);
     }
 
     /* 2. Run. */
@@ -1534,31 +1542,35 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
     const unsigned op = (unsigned)x.op & 0xFFFF;
     amdhv::apic::AtpicState &pic = vm->atpic[(x.a >> 32) & 1];
     const unsigned irq = (unsigned)x.a & 0xFF;
+    /* vcpuRun() feeds these same models into the per-vCPU LAPIC, so every read and write of the
+     * VM-wide APIC state has to be serialized here. One lock around the switch keeps it simple;
+     * IOLock is a sleeping mutex, so copyin/copyout while holding it is fine. */
+    IOLockLock(vm->lock);
+    auto fail = [&]() -> kern_return_t { IOLockUnlock(vm->lock); vmUnpin(vm); return kHvError; };
     switch (op) {
     case 0x74: if (irq < 8 && !(pic.mask & (1u << irq))) pic.request |= 1u << irq; break;
     case 0x75: if (irq < 8) pic.request &= ~(1u << irq); break;
-    case 0x76: { uint8_t m = pic.mask; if (copyout(&m, (user_addr_t)x.b, 1)) { vmUnpin(vm); return kHvError; } break; }
+    case 0x76: { uint8_t m = pic.mask; if (copyout(&m, (user_addr_t)x.b, 1)) return fail(); break; }
     case 0x77: pic.mask = (uint8_t)(x.a >> 32); break;
     case 0x78: { uint32_t ver = 100;   /* HV_ATPIC_STATE_EXT_VER */
-                 if (copyout(&ver, (user_addr_t)x.b, 4) || copyout(&pic, (user_addr_t)x.b + 4, sizeof(pic))) { vmUnpin(vm); return kHvError; } break; }
-    case 0x79: if (copyin((user_addr_t)x.b + 4, &pic, sizeof(pic))) { vmUnpin(vm); return kHvError; } break;
+                 if (copyout(&ver, (user_addr_t)x.b, 4) || copyout(&pic, (user_addr_t)x.b + 4, sizeof(pic))) return fail(); break; }
+    case 0x79: if (copyin((user_addr_t)x.b + 4, &pic, sizeof(pic))) return fail(); break;
     case 0x6b: amdhv::apic::assertIrq(vm->ioapic, irq); break;
     case 0x6c: amdhv::apic::deassertIrq(vm->ioapic, irq); break;
     case 0x6d: amdhv::apic::assertIrq(vm->ioapic, irq); amdhv::apic::deassertIrq(vm->ioapic, irq); break;
     case 0x6f: { uint32_t v = amdhv::apic::ioRead(vm->ioapic, vm->ioapic.ioregsel);
-                 if (copyout(&v, (user_addr_t)x.b, 4)) { vmUnpin(vm); return kHvError; } break; }
+                 if (copyout(&v, (user_addr_t)x.b, 4)) return fail(); break; }
     case 0x70: amdhv::apic::ioWrite(vm->ioapic, vm->ioapic.ioregsel, (uint32_t)x.b); break;
     case 0x71: { uint32_t ver = 100;   /* HV_IOAPIC_STATE_EXT_VER */
                   /* the state pointer is in a; b is a framework cookie; state begins at +8 */
-                  if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break; }
-    case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) { vmUnpin(vm); return kHvError; } break;
+                  if (copyout(&ver, (user_addr_t)x.a, 4) || copyout(&vm->ioapic, (user_addr_t)x.a + 8, sizeof(vm->ioapic))) return fail(); break; }
+    case 0x72: if (copyin((user_addr_t)x.a + 8, &vm->ioapic, sizeof(vm->ioapic))) return fail(); break;
     /* hv_vm_send_ioapic_intr(data): Apple documents data as an IOAPIC redirection table entry
      * (vector 7:0, mask 16, destination 63:56). Deliver to that LAPIC, or to all for 0xff. */
     case 0x73: {
         const amdhv::apic::IoapicIntrWire w = amdhv::apic::decodeIoapicIntr(x.a);
         if (!w.valid)
             break;
-        IOLockLock(vm->lock);
         for (unsigned id = 0; id < kMaxVcpus; id++) {
             HvVcpu *target = vm->vcpu[id];
             if (!target || !target->cpu)
@@ -1567,7 +1579,6 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
                 continue;
             amdhv::apic::setIrr(target->lapic, w.vector);
         }
-        IOLockUnlock(vm->lock);
         break;
     }
     /* hv_vm_lapic_set_intr(vcpu, vector, trigger): a carries the vCPU id in its low half and the
@@ -1577,16 +1588,15 @@ kern_return_t tIntCtl(void *target, uint64_t arg)
         const amdhv::apic::LapicIntrWire w = amdhv::apic::decodeLapicIntr(x.a, x.b);
         if (w.vcpu >= kMaxVcpus)
             break;
-        IOLockLock(vm->lock);
         HvVcpu *target = vm->vcpu[w.vcpu];
         if (target && target->cpu)
             amdhv::apic::setIrr(target->lapic, w.vector);
-        IOLockUnlock(vm->lock);
         break;
     }
     case 0x7a: break;                       /* APIC bus frequency: no timer emulation yet */
-    default: vmUnpin(vm); return kHvUnsupportedCode;
+    default: IOLockUnlock(vm->lock); vmUnpin(vm); return kHvUnsupportedCode;
     }
+    IOLockUnlock(vm->lock);
     vmUnpin(vm);
     return kHvOk;
 }
@@ -1721,7 +1731,7 @@ kern_return_t stub(void *target, uint64_t arg)
     SInt32 n = OSIncrementAtomic((volatile SInt32 *)&gCount[Type][Index]) + 1;
     if (n <= 24 || (n % 1000) == 0)
         logTrap(Type, Index, arg, n);
-    return gMode >= 2 ? KERN_SUCCESS : kHvUnsupported;
+    return __atomic_load_n(&gMode, __ATOMIC_ACQUIRE) >= 2 ? KERN_SUCCESS : kHvUnsupported;
 }
 
 #define S(T, I) stub<T, I>
@@ -1753,13 +1763,13 @@ namespace hv {
  *
  * @return The bool result.
  */
-bool registered() { return gRegistered; }
+bool registered() { return __atomic_load_n(&gRegistered, __ATOMIC_ACQUIRE); }
 /**
  * @brief Return the current front-end mode.
  *
  * @return The uint32_t result.
  */
-uint32_t mode() { return gRegistered ? gMode : 0; }
+uint32_t mode() { return __atomic_load_n(&gRegistered, __ATOMIC_ACQUIRE) ? __atomic_load_n(&gMode, __ATOMIC_ACQUIRE) : 0; }
 
 /**
  * @brief Set Tpr Shadow.
@@ -1770,7 +1780,7 @@ uint32_t mode() { return gRegistered ? gMode : 0; }
  */
 bool setTprShadow(bool on)
 {
-    gTprShadow = on ? 1 : 0;
+    __atomic_store_n(&gTprShadow, on ? 1 : 0, __ATOMIC_RELEASE);
     AMDHV_SYNC("hv front end: TPR shadow is %s for the VMs created from now on", on ? "offered" : "not offered");
     return true;
 }
@@ -1780,7 +1790,10 @@ bool setTprShadow(bool on)
  *
  * @return The bool result.
  */
-bool tprShadow() { return gTprShadow != 0; }
+bool tprShadow() { return __atomic_load_n(&gTprShadow, __ATOMIC_ACQUIRE) != 0; }
+
+/** Whether the per-exit FPU round-trip self-check is enabled (amdhv_fpu_check=1). */
+bool fpuCheck() { return gFpuCheck != 0; }
 /**
  * @brief Check whether the kext wrote kern.hv_support.
  *
@@ -1828,7 +1841,7 @@ static bool registerTraps()
         hv_release_traps(HV_TASK_TRAP);
         return false;
     }
-    gRegistered = true;
+    __atomic_store_n(&gRegistered, true, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -1842,30 +1855,30 @@ static bool registerTraps()
 bool setMode(uint32_t m)
 {
     if (m == 0) {
-        if (gRegistered && gLiveVms > 0) {
+        if (__atomic_load_n(&gRegistered, __ATOMIC_ACQUIRE) && gLiveVms > 0) {
             AMDHV_WARN("hv front end: %d VM(s) exist, not unregistering (the kernel calls the callbacks without a NULL check)", (int)gLiveVms);
             return false;
         }
-        if (gRegistered) {
+        if (__atomic_load_n(&gRegistered, __ATOMIC_ACQUIRE)) {
             setSysctl(false);
             hv_release_traps(HV_THREAD_TRAP);
             hv_release_traps(HV_TASK_TRAP);
             hv_release_callbacks();
-            gRegistered = false;
+            __atomic_store_n(&gRegistered, false, __ATOMIC_RELEASE);
             AMDHV_SYNC("AMDHV hv front end: unregistered (Apple's tables are not put back)");
         }
         return true;
     }
     if (m > 2)
         m = 2;
-    if (!gRegistered) {
+    if (!__atomic_load_n(&gRegistered, __ATOMIC_ACQUIRE)) {
         AMDHV_SYNC("AMDHV hv front end: registering in place of AppleHV");
         if (!registerTraps())
             return false;
     }
-    gMode = m;
-    AMDHV_INFO("hv front end: registered (mode %u: traps are logged and answered %s)", gMode,
-             gMode >= 2 ? "success" : "HV_UNSUPPORTED");
+    __atomic_store_n(&gMode, m, __ATOMIC_RELEASE);
+    AMDHV_INFO("hv front end: registered (mode %u: traps are logged and answered %s)", m,
+             m >= 2 ? "success" : "HV_UNSUPPORTED");
     return true;
 }
 
@@ -1938,7 +1951,7 @@ bool setSysctl(bool on)
         }
         return true;
     }
-    if (!gRegistered)
+    if (!__atomic_load_n(&gRegistered, __ATOMIC_ACQUIRE))
         return false;
     if (gSupportSet)
         return true;
@@ -1992,10 +2005,13 @@ void start(com_amdhv_AMDHV *service)
     uint32_t v = 0;
     uint32_t tprArg = 1;
     if (PE_parse_boot_argn("amdhv_tpr_shadow", &tprArg, sizeof(tprArg)))
-        gTprShadow = tprArg ? 1 : 0;
+        __atomic_store_n(&gTprShadow, tprArg ? 1 : 0, __ATOMIC_RELEASE);
     uint32_t apicArg = 0;
     if (PE_parse_boot_argn("amdhv_apic", &apicArg, sizeof(apicArg)))
         gApicAccel = apicArg ? 1 : 0;
+    uint32_t fpuCheckArg = 0;
+    if (PE_parse_boot_argn("amdhv_fpu_check", &fpuCheckArg, sizeof(fpuCheckArg)))
+        gFpuCheck = fpuCheckArg ? 1 : 0;
     if (!PE_parse_boot_argn("amdhv_hv", &v, sizeof(v)) || v == 0)
         return;
     if (!setMode(v))
