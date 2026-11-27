@@ -48,6 +48,10 @@ lists APIs absent from that SDK (SME/SVE register access, `hv_vm_config_*_ipa_si
 `hv_vcpu_invalidate_tlb`), most of them Apple-silicon-only. So "79 of 79" is not a claim about the
 whole framework as documented today, and this page does not cover those calls.
 
+The macOS 26.5 (Tahoe) x86 headers are unchanged from 15.4: same functions, constants and layouts.
+Only the umbrella header's includes and the `API_UNAVAILABLE(ios, tvos)` annotations changed; the new
+26.0 IPA-granule APIs are Apple-silicon-only.
+
 ---
 
 ## 1. Hypervisor.framework API matrix
@@ -357,6 +361,7 @@ A kext change needs a reboot; the running kext cannot be replaced in place.
 | Reboot 2026-11-26 (MSI build, UUID `A5468CB4`) | `make test` 20/20, `make kext tools` clean, `--apic-inject` all three handlers reached, `--apic-run` handler reached, `--matrix` 79/79, `--apic` 31 ok / 5 `HV_ERROR`, `hvf-smoke` PASS, all four failure counters 0 | The previous kext answered `lapic_msi` with `ok` but the guest stayed at the entry HLT (`MISSED`). A two-vCPU probe confirmed physical MSI destination 1 and the redirection hint route to the expected vCPUs. |
 | Reboot 2026-11-26 (PIO notifier build, UUID `6A912009`) | `make test` 21/21, `make kext tools` clean (398 symbols), `--pio-notifier` add/remove `ok`, `OUT` suppressed, message `addr=3f8 size=1 value=42`, `--matrix` 79/79 with both notifier calls `ok`, `--apic-inject` and `--apic-run` still pass, `hvf-smoke` PASS, all four failure counters 0 | The previous kext returned `HV_UNSUPPORTED` (with only a receive right) or `HV_ERROR` (after a send right was added) and never fired. The client needs a send right; a receive right alone is rejected by xnu's `ipc_typed_port_copyin_send`. |
 | Reboot 2026-11-26 (exit-info build, UUID `642B927D`) | `make test` 22/22, `make kext tools` clean, `--exitinfo` all six helpers `HV_ERROR` with no event, `--exitinfo-mmio` code 7 + value `0x10100` and code 4 + vector `0x30`, `--matrix` 79/79, `--apic` 31 ok / 5 `HV_ERROR`, `--apic-inject`, `--apic-run` and `--pio-notifier` still pass, `hvf-smoke` PASS, all four failure counters 0 | Wire discovery used temporary debug builds and guest-controlled `AL`; the final build publishes real APIC events through `amdhv_exitinfo_encode()` and clears the page every run. INIT/SIPI and #GP publication remains unprobed live. |
+| macOS 26.7.3 (Tahoe, SDK 26.5), 2026-11-28 | `make test` 22/22, `hvf-smoke` PASS, `hvf-probe --matrix` 79/79, `amd-info selftest` 12/12, `kern.hv_support=1`, loaded kext 0.5.0 | No x86_64 API change from SDK 15.4. After the CLT upgrade, stale clang 17 test binaries could not find their ASan runtime; `Makefile` now detects a compiler change and rebuilds them automatically. |
 | VZ guest, 32 min, 6 vCPU / 4 GiB | 35,985,555 VM runs, 36,748,682 exits, 30.5M NPF exits | `vmInvalidExits = 0`, `assertFailures = 0`; EPT-violation path is the hot path. |
 | Limitation validation 2026-11-23 (0.2.0) | 64 vCPUs, 64 spaces, 16 GiB map cap, 2 concurrent VMs | unsigned process created a VM; PIO/APIC/extint answered `HV_UNSUPPORTED`. |
 | S3/S4 attempts | host never reached S3 | `sleepEvents = 0`, `wakeEvents = 0`; not a kext fault. Acceptance still pending. |
