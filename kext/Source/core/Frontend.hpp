@@ -26,6 +26,7 @@ bool setMode(uint32_t mode);
 bool setSysctl(bool on);
 bool setTprShadow(bool on);      /* offer the TPR shadow to VMs created afterwards */
 bool tprShadow();
+bool fpuCheck();          /* amdhv_fpu_check=1: keep the per-exit FPU round-trip self-check */
 uint32_t mode();
 bool registered();
 bool sysctlTaken();

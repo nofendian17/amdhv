@@ -330,10 +330,16 @@ IOReturn com_amdhv_AMDHVVm::run(bool skipInstruction, AMDHVExit *out, uint64_t d
         if (guestX != hostX)
             amdhv::fpu::xsetbv0(hostX);
         amdhv::fpu::xrstor(fHostFpu.va, hostX);
-        /* Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own). */
-        amdhv::fpu::xsave(fScratchFpu.va, hostX);
-        if (!amdhv::fpu::legacyEqual((const uint8_t *)fHostFpu.va, (const uint8_t *)fScratchFpu.va))
-            AMDHV_STAT_INC(vmFpuMismatches);
+        /*
+         * Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own).
+         * This is a diagnostic, not part of the swap: it costs a second XSAVE and a 512-byte compare on
+         * every exit. Keep it opt-in (amdhv_fpu_check=1); the state swap above runs either way.
+         */
+        if (amdhv::hv::fpuCheck()) {
+            amdhv::fpu::xsave(fScratchFpu.va, hostX);
+            if (!amdhv::fpu::legacyEqual((const uint8_t *)fHostFpu.va, (const uint8_t *)fScratchFpu.va))
+                AMDHV_STAT_INC(vmFpuMismatches);
+        }
         amdhv::fpu::restoreTs(wasTs);
 
         __asm__ volatile("movq %0, %%cr2" : : "r"(hostCr2));

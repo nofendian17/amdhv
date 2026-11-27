@@ -140,6 +140,9 @@ volatile SInt32 gLiveVms = 0;
  * a Windows boot. On by default; the boot-arg amdhv_tpr_shadow=0 or `amd-info hv tpr 0` turns it off for the VMs created from then on. */
 volatile int gTprShadow = 1;
 volatile int gApicAccel = 0;                           /* amdhv_apic=1: let clients ask for hv_vm_create(HV_VM_ACCEL_APIC) */
+/* amdhv_fpu_check=1: keep the extra XSAVE + legacy-state compare after every VMRUN. Diagnostic only;
+ * the state swap itself is unchanged, so the check is off by default to keep the exit path cheap. */
+volatile int gFpuCheck = 0;
 
 volatile int *gSupportPtr = nullptr;                 /* the kernel's hv_support_available once located and written */
 int gSupportSaved = 0;
@@ -1781,6 +1784,9 @@ bool setTprShadow(bool on)
  * @return The bool result.
  */
 bool tprShadow() { return gTprShadow != 0; }
+
+/** Whether the per-exit FPU round-trip self-check is enabled (amdhv_fpu_check=1). */
+bool fpuCheck() { return gFpuCheck != 0; }
 /**
  * @brief Check whether the kext wrote kern.hv_support.
  *
@@ -1996,6 +2002,9 @@ void start(com_amdhv_AMDHV *service)
     uint32_t apicArg = 0;
     if (PE_parse_boot_argn("amdhv_apic", &apicArg, sizeof(apicArg)))
         gApicAccel = apicArg ? 1 : 0;
+    uint32_t fpuCheckArg = 0;
+    if (PE_parse_boot_argn("amdhv_fpu_check", &fpuCheckArg, sizeof(fpuCheckArg)))
+        gFpuCheck = fpuCheckArg ? 1 : 0;
     if (!PE_parse_boot_argn("amdhv_hv", &v, sizeof(v)) || v == 0)
         return;
     if (!setMode(v))
